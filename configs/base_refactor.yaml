@@ -1,0 +1,106 @@
+distributed:
+  enabled: true
+  backend: nccl
+
+model:
+  name: sam3
+  bpe_path: /home/haozi/code/DL/ObjectDetection/ZS_PV/third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  checkpoint_path: /home/haozi/code/DL/ObjectDetection/ZS_PV/weights/facebook/sam3/sam3.pt
+  device: cuda
+  detection_threshold: 0.5
+
+data:
+  data_root: ""
+  image_path: []
+  image_glob: ""
+  image_list_file: ""
+  dom_shp: ""
+
+inference:
+  text_prompt: "a PV Panel"
+  dataloader:
+    batch_size: 4
+    num_workers: 2
+    pin_memory: true
+  slicing:
+    slice_height: 1024
+    slice_width: 1024
+    overlap_height_ratio: 0.5
+    overlap_width_ratio: 0.5
+  prompt:
+    enabled: false
+    source: ""
+    max_prompt_per_window: 5
+    # If true, only windows with valid prompt boxes are inferred.
+    strict_window_prompt: false
+  early_filter:
+    min_score: 0.2
+    min_area_px: 10.0
+
+projection:
+  # mode: dom | oblique | auto
+  # dom: use geotransform directly
+  # oblique: use DSM + POS with collinearity and affine fitting
+  # auto: if geotransform exists use dom, otherwise oblique
+  mode: auto
+  project_coordinates: true
+  oblique:
+    pose_csv: ""
+    dsm_path: ""
+    # camera intrinsics / principal point
+    focal: 3713.29
+    cx: 2647.02
+    cy: 1969.28
+    # approximate panel altitude used in collinearity fallback
+    avg_alt: 30.8
+    # affine fitting sampling controls
+    sample_interval: 50
+    max_alt_diff: 3.0
+    search_margin_px: 200
+    min_control_points: 5
+    # image size for in-image validation
+    image_width: 5280
+    image_height: 3956
+    # performance / extension hooks
+    preload_dsm: false
+    enable_slope_correction: false
+  score:
+    # mode: standard | legacy_gaussian
+    mode: standard
+    target_length: 2.2
+    target_width: 1.1
+    area_beta: 0.8
+    ratio_beta: 0.35
+    shape_beta: 0.2
+    # legacy_gaussian params
+    area_target: 2.42
+    mu_r: 2.03
+    sigma_r: 0.2
+    beta: 0.25
+    combine_mode: weighted
+    gamma: 1.0
+    product_use_shape: true
+    w_area: 1.0
+    w_ratio: 1.0
+    w_shape: 1.0
+    w_sem: 0.4
+    w_pv: 0.6
+
+postprocess:
+  multiview:
+    enabled: true
+    strategy: nms_keep_max
+    score_field: con_weight
+    iou_threshold: 0.2
+  dom_merge:
+    enabled: false
+    strategy: confidence
+    score_field: con_weight
+    iou_threshold: 0.2
+    dom_score_field: con
+    dom_label_field: label
+    dom_src_field: src
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/per_image
+  final_merged_shp: outputs/refactor_v2/final/final_merged.shp

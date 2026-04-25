@@ -1,0 +1,35 @@
+_base_:
+  - ./base_refactor.yaml
+
+data:
+  # Option 1: explicit image list
+  image_path:
+    - /mnt/h/dataset/PV/001-BeiOu/images/DJI_20251013154527_0001_V.JPG
+
+  # Option 2: glob pattern (set image_path to [] when using this)
+  # image_glob: /mnt/h/dataset/PV/001-BeiOu/images/*.JPG
+
+  # Option 3: text file that lists absolute image paths line by line
+  # image_list_file: /path/to/images.txt
+
+  # Optional DOM result for final merge
+  dom_shp: ""
+
+inference:
+  prompt:
+    enabled: false
+    source: ""
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/beiou/per_image
+  final_merged_shp: outputs/refactor_v2/beiou/final/merged.shp
+
+projection:
+  # DOM example
+  # mode: dom
+
+  # Oblique example
+  # mode: oblique
+  # oblique:
+  #   pose_csv: /mnt/h/dataset/PV/003-XinXie/CAM/pose.csv
+  #   dsm_path: /mnt/h/dataset/PV/003-XinXie/dsm/DSM.tif

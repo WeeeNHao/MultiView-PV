@@ -1,0 +1,39 @@
+_base_:
+  - ./oblique_mode_template.yaml
+
+# This template is intended to approximate legacy process.py/process_dom.py behavior.
+inference:
+  prompt:
+    enabled: true
+    source: /path/to/prompt_txt_dir
+    max_prompt_per_window: 5
+    strict_window_prompt: true
+  early_filter:
+    min_score: 0.0
+    min_area_px: 0.0
+
+projection:
+  score:
+    mode: legacy_gaussian
+    area_target: 2.42
+    mu_r: 2.03
+    sigma_r: 0.2
+    beta: 0.25
+    shape_beta: 0.1
+    combine_mode: weighted
+    w_area: 10.0
+    w_ratio: 5.0
+    w_shape: 5.0
+    w_sem: 0.2
+    w_pv: 0.8
+
+postprocess:
+  multiview:
+    strategy: nms_keep_max
+    iou_threshold: 0.25
+  dom_merge:
+    iou_threshold: 0.25
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/legacy_compat/per_image
+  final_merged_shp: outputs/refactor_v2/legacy_compat/final/fused.shp

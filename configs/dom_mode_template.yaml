@@ -1,0 +1,21 @@
+_base_:
+  - ./base_refactor.yaml
+
+projection:
+  mode: dom
+
+# DOM image or image list
+# Usually GeoTIFF/DOM with geotransform
+
+data:
+  image_path:
+    - /path/to/dom/DOM.tif
+
+# DOM-only run normally does not merge with dom_shp again
+postprocess:
+  dom_merge:
+    enabled: false
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/dom/per_image
+  final_merged_shp: outputs/refactor_v2/dom/final/dom_merged.shp

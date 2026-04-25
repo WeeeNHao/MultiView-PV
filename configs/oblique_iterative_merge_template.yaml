@@ -1,0 +1,18 @@
+_base_:
+  - ./oblique_mode_template.yaml
+
+# Use previous-round DOM or fused result as external merge source
+
+data:
+  dom_shp: /path/to/prev_round_or_dom/dom_or_fused.shp
+
+postprocess:
+  dom_merge:
+    enabled: true
+    strategy: confidence
+    score_field: con_weight
+    iou_threshold: 0.2
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/iter/per_image
+  final_merged_shp: outputs/refactor_v2/iter/final/fused_iter.shp

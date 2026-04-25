@@ -1,0 +1,31 @@
+_base_:
+  - ./base_refactor.yaml
+
+projection:
+  mode: oblique
+  oblique:
+    pose_csv: /path/to/CAM/pose.csv
+    dsm_path: /path/to/dsm/DSM.tif
+    # Optional camera and sampling settings (inherit defaults if omitted)
+    # focal: 3713.29
+    # cx: 2647.02
+    # cy: 1969.28
+    # avg_alt: 30.8
+
+# Oblique images
+
+data:
+  image_glob: /path/to/images/*.JPG
+  # Iteration merge input (set in later rounds)
+  dom_shp: ""
+
+postprocess:
+  dom_merge:
+    enabled: false
+    strategy: confidence
+    score_field: con_weight
+    iou_threshold: 0.2
+
+output:
+  per_image_shp_dir: outputs/refactor_v2/oblique/per_image
+  final_merged_shp: outputs/refactor_v2/oblique/final/oblique_merged.shp
