@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from refactor_v2.inference.models.base import DetectionModelAdapter
-from refactor_v2.inference.models.sam3_segmenter import SAM3Segmenter
+from inference.models.base import DetectionModelAdapter
+from inference.models.sam3_segmenter import SAM3Segmenter
 
 
 class SAM3Adapter(DetectionModelAdapter):

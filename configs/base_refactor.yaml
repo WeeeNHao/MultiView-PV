@@ -4,8 +4,8 @@ distributed:
 
 model:
   name: sam3
-  bpe_path: /home/haozi/code/DL/ObjectDetection/ZS_PV/third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-  checkpoint_path: /home/haozi/code/DL/ObjectDetection/ZS_PV/weights/facebook/sam3/sam3.pt
+  bpe_path: /data/code/DL/PVSegmentation/MultiView-PV/third_party/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  checkpoint_path: /data/code/DL/PVSegmentation/MultiView-PV/weights/facebook/sam3/sam3.pt
   device: cuda
   detection_threshold: 0.5
 

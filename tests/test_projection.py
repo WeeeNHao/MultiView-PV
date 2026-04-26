@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 
-from refactor_v2.projection.collinearity import (
+from projection.collinearity import (
     build_rotation,
     photo_to_ground,
     ground_to_photo,

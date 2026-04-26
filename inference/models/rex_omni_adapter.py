@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from refactor_v2.inference.models.base import DetectionModelAdapter
+from inference.models.base import DetectionModelAdapter
 
 
 class RexOmniAdapter(DetectionModelAdapter):
@@ -22,5 +22,5 @@ class RexOmniAdapter(DetectionModelAdapter):
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError(
             "Rex-Omni adapter is not implemented yet. "
-            "Please implement model loading/inference in refactor_v2/inference/models/rex_omni_adapter.py"
+            "Please implement model loading/inference in inference/models/rex_omni_adapter.py"
         )

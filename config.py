@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from omegaconf import OmegaConf
 
-from refactor_v2.config_loader import load_config
+from config_loader import load_config
 
 
 @dataclass

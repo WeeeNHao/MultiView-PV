@@ -1,7 +1,7 @@
 import pytest
 import os
 import tempfile
-from refactor_v2.io.input_resolver import resolve_image_paths
+from input_resolver import resolve_image_paths
 
 def test_resolve_image_paths_single():
     cfg = {"image_path": "/fake/path/image1.jpg"}

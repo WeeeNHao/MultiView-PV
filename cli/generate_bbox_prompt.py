@@ -9,10 +9,10 @@ from osgeo import gdal, ogr
 from shapely.geometry import Polygon
 from tqdm import tqdm
 
-from refactor_v2.cli.select_views import ImageFootprintIndex
-from refactor_v2.config_loader import load_config
-from refactor_v2.io.input_resolver import resolve_image_paths
-from refactor_v2.projection.collinearity import (
+from cli.select_views import ImageFootprintIndex
+from config_loader import load_config
+from input_resolver import resolve_image_paths
+from projection.collinearity import (
     build_rotation,
     geo_to_image_xy,
     ground_to_photo,

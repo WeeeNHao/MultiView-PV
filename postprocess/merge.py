@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-from refactor_v2.postprocess.nms import nms_features
+from postprocess.nms import nms_features
 
 
 def _score_of(feature: Dict[str, Any], score_field: str) -> float:

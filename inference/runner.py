@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 from torch.utils.data import DataLoader
 
-from refactor_v2.common import Feature, FeatureList, GeoMeta
-from refactor_v2.inference.models.base import DetectionModelAdapter
-from refactor_v2.inference.window_dataset import SlidingWindowDataset, window_collate
+from common import Feature, FeatureList, GeoMeta
+from inference.models.base import DetectionModelAdapter
+from inference.window_dataset import SlidingWindowDataset, window_collate
 
 
 def mask_to_polygon(mask: np.ndarray, threshold: float = 0.5) -> List[List[float]]:
@@ -195,3 +195,7 @@ class InferenceRunner:
                 all_features.extend(window_features)
 
         return all_features, dataset.geo_meta
+
+
+if __name__ == "__main__":
+    pass

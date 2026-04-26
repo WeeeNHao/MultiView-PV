@@ -4,9 +4,6 @@ _base_:
 projection:
   mode: dom
 
-# DOM image or image list
-# Usually GeoTIFF/DOM with geotransform
-
 data:
   image_path:
     - /path/to/dom/DOM.tif

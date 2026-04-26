@@ -4,9 +4,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from osgeo import ogr
 
-from refactor_v2.common import Feature, FeatureList, GeoMeta
-from refactor_v2.projection.oblique_projector import ObliqueProjector
-from refactor_v2.projection.scoring import compute_pv_geometry_score
+from common import Feature, FeatureList, GeoMeta
+from projection.oblique_projector import ObliqueProjector
+from projection.scoring import compute_pv_geometry_score
 
 
 _OBLIQUE_PROJECTOR_CACHE: Dict[str, ObliqueProjector] = {}

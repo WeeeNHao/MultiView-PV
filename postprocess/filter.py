@@ -4,7 +4,7 @@ import numpy as np
 from typing import Any, Dict, List
 from shapely.geometry import Polygon
 from osgeo import ogr
-from refactor_v2.common import Feature, FeatureList
+from common import Feature, FeatureList
 
 def max_polygon_angle(poly: Polygon) -> float:
     if not poly.is_valid or poly.is_empty:
@@ -107,12 +107,12 @@ def pv_consistency_score(
 
 
 def _feature_to_polygon(feature: Feature) -> Polygon:
-    from refactor_v2.io.shp_io import _segmentation_to_polygon
+    from shp_io import _segmentation_to_polygon
     geom = _segmentation_to_polygon(feature.get("segmentation"))
     if geom is None or geom.IsEmpty():
         bbox = feature.get("bbox", [])
         if len(bbox) == 4:
-            from refactor_v2.io.shp_io import _bbox_to_polygon
+            from shp_io import _bbox_to_polygon
             geom = _bbox_to_polygon(bbox)
             
     if geom is None or geom.IsEmpty():

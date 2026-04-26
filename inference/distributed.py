@@ -6,7 +6,7 @@ from typing import List, Sequence, TypeVar
 import torch
 import torch.distributed as dist
 
-from refactor_v2.common import DistInfo
+from common import DistInfo
 
 T = TypeVar("T")
 

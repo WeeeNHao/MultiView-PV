@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from refactor_v2.inference.models.base import DetectionModelAdapter
-from refactor_v2.inference.models.rex_omni_adapter import RexOmniAdapter
-from refactor_v2.inference.models.sam3_adapter import SAM3Adapter
+from inference.models.base import DetectionModelAdapter
+from inference.models.rex_omni_adapter import RexOmniAdapter
+from inference.models.sam3_adapter import SAM3Adapter
 
 
 _MODEL_REGISTRY = {

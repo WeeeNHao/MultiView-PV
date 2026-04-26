@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from osgeo import gdal
 
-from refactor_v2.common import Feature
-from refactor_v2.projection.collinearity import (
+from common import Feature
+from projection.collinearity import (
     build_rotation,
     compute_affine_transform,
     geo_to_image_xy,

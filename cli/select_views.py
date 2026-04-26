@@ -9,9 +9,9 @@ from osgeo import ogr
 from rtree import index
 from tqdm import tqdm
 
-from refactor_v2.config_loader import load_config
-from refactor_v2.io.input_resolver import resolve_image_paths
-from refactor_v2.projection.collinearity import build_rotation, photo_to_ground, read_pose_csv
+from config_loader import load_config
+from input_resolver import resolve_image_paths
+from projection.collinearity import build_rotation, photo_to_ground, read_pose_csv
 
 
 def _normalize_src(src: str) -> str:

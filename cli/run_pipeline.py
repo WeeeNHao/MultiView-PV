@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from refactor_v2.config import load_runtime_config, parse_args
-from refactor_v2.pipeline import run_pipeline
+from config import load_runtime_config, parse_args
+from pipeline import run_pipeline
 
 
 def main() -> None:

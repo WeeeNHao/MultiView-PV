@@ -1,0 +1,10 @@
+weights/
+outputs/
+__pycache__/
+*.pyc
+.env
+.vscode/
+.ipynb_checkpoints/
+.DS_Store
+logs/
+tmp/

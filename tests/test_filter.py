@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 from shapely.geometry import Polygon
 
-from refactor_v2.postprocess.filter import (
+from postprocess.filter import (
     max_polygon_angle,
     _safe_aspect_ratio,
     _shape_rectangularity,
