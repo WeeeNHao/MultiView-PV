@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from config import load_runtime_config, parse_args
+from utils.config import load_runtime_config, parse_args
 from pipeline import run_pipeline
 
 

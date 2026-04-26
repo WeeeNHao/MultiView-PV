@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from common import DistInfo, FeatureList
-from config import RuntimeConfig
+from utils.common import DistInfo, FeatureList
+from utils.config import RuntimeConfig
 from inference.distributed import (
     barrier_if_needed,
     cleanup_distributed,
@@ -18,10 +18,10 @@ from inference.distributed import (
 )
 from inference.models import build_model
 from inference.runner import InferenceRunner
-from input_resolver import resolve_image_paths
-from log_utils import PipelineRunLogger
+from io_flow.input_resolver import resolve_image_paths
+from utils.log_utils import PipelineRunLogger
 from postprocess import fuse_multiview_features, merge_image_with_dom_features
-from shp_io import export_features_to_shapefile, read_features_from_shapefile
+from io_flow.shp_io import export_features_to_shapefile, read_features_from_shapefile
 from projection import project_and_score_features
 
 

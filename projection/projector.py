@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from osgeo import ogr
 
-from common import Feature, FeatureList, GeoMeta
+from utils.common import Feature, FeatureList, GeoMeta
 from projection.oblique_projector import ObliqueProjector
 from projection.scoring import compute_pv_geometry_score
 

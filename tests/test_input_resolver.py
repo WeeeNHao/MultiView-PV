@@ -1,7 +1,7 @@
 import pytest
 import os
 import tempfile
-from input_resolver import resolve_image_paths
+from io_flow.input_resolver import resolve_image_paths
 
 def test_resolve_image_paths_single():
     cfg = {"image_path": "/fake/path/image1.jpg"}

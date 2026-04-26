@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from torch.utils.data import DataLoader
 
-from common import Feature, FeatureList, GeoMeta
+from utils.common import Feature, FeatureList, GeoMeta
 from inference.models.base import DetectionModelAdapter
 from inference.window_dataset import SlidingWindowDataset, window_collate
 

@@ -10,8 +10,8 @@ from shapely.geometry import Polygon
 from tqdm import tqdm
 
 from cli.select_views import ImageFootprintIndex
-from config_loader import load_config
-from input_resolver import resolve_image_paths
+from utils.config_loader import load_config
+from io_flow.input_resolver import resolve_image_paths
 from projection.collinearity import (
     build_rotation,
     geo_to_image_xy,

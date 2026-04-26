@@ -9,8 +9,8 @@ from osgeo import ogr
 from rtree import index
 from tqdm import tqdm
 
-from config_loader import load_config
-from input_resolver import resolve_image_paths
+from utils.config_loader import load_config
+from io_flow.input_resolver import resolve_image_paths
 from projection.collinearity import build_rotation, photo_to_ground, read_pose_csv
 
 

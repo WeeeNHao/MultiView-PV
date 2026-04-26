@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from osgeo import gdal
 
-from common import Feature
+from utils.common import Feature
 from projection.collinearity import (
     build_rotation,
     compute_affine_transform,

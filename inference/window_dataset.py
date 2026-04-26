@@ -11,7 +11,7 @@ from osgeo import gdal
 from PIL import Image
 from torch.utils.data import Dataset
 
-from common import GeoMeta
+from utils.common import GeoMeta
 
 
 gdal.UseExceptions()

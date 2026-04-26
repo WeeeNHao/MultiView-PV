@@ -5,7 +5,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 from osgeo import ogr
 
-from common import Feature, FeatureList
+from utils.common import Feature, FeatureList
 
 
 def _ensure_parent_dir(path: str) -> None:

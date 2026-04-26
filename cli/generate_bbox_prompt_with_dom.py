@@ -6,8 +6,8 @@ from typing import List, Optional, Tuple
 
 from osgeo import gdal, ogr, osr
 
-from config_loader import load_config
-from input_resolver import resolve_image_paths
+from utils.config_loader import load_config
+from io_flow.input_resolver import resolve_image_paths
 
 
 def geo_to_pixel(geo_transform: Tuple[float, ...], x: float, y: float) -> Tuple[float, float]:
