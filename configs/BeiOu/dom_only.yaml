@@ -1,0 +1,30 @@
+_base_:
+  - ./base.yaml
+
+pipeline:
+  run_inference: true
+
+data:
+  data_root: "/data/dataset/PV/001-BeiOu/"
+  image_path:
+    - "dom/DOM.tif"
+  
+
+postprocess:
+  view_selection:
+    enabled: false
+  multiview:
+    enabled: true
+    strategy: nms_keep_max
+    score_field: con_weight
+    iou_threshold: 0.2
+  dom_merge:
+    enabled: false
+
+projection:
+  mode: dom
+
+
+output:
+  per_image_shp_dir: /data/dataset/PV/ZS_PV/001-BeiOu/dom/
+  final_merged_shp: /data/dataset/PV/ZS_PV/001-BeiOu/dom/dom_merged.shp

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from tqdm import tqdm
+
 from osgeo import ogr
 
 from utils.common import Feature, FeatureList, GeoMeta
@@ -57,8 +59,12 @@ def _bbox_from_segmentation(segmentation: List[List[float]]) -> List[float]:
 
 
 def _feature_to_geometry(feature: Feature) -> Optional[ogr.Geometry]:
+    if "geom" in feature and feature["geom"] is not None:
+        return feature["geom"]
+
     seg = feature.get("segmentation")
     if not isinstance(seg, list) or not seg:
+        feature["geom"] = None
         return None
 
     poly = ogr.Geometry(ogr.wkbPolygon)
@@ -76,7 +82,9 @@ def _feature_to_geometry(feature: Feature) -> Optional[ogr.Geometry]:
             poly.AddGeometry(ring)
 
     if poly.IsEmpty():
+        feature["geom"] = None
         return None
+    feature["geom"] = poly
     return poly
 
 
@@ -138,6 +146,7 @@ def project_and_score_features(
     geo_meta: GeoMeta,
     projection_cfg: Dict[str, Any],
     image_path: Optional[str] = None,
+    progress_position: int = 1,
 ) -> FeatureList:
     if not features:
         return []
@@ -146,9 +155,17 @@ def project_and_score_features(
     project_coordinates = bool(projection_cfg.get("project_coordinates", True))
     mode = str(projection_cfg.get("mode", "auto")).lower()
     oblique_cfg = projection_cfg.get("oblique", {})
+    score_threshold = float(score_cfg.get("score_threshold", 0.0))
 
     transformed: FeatureList = []
-    for feature in features:
+    filtered = 0
+    pbar = tqdm(
+        features,
+        desc="Projecting feature",
+        leave=False,
+        position=progress_position,
+    )
+    for feature in pbar:
         out = dict(feature)
         gt = geo_meta.geotransform
 
@@ -163,6 +180,11 @@ def project_and_score_features(
             projector = _get_oblique_projector(oblique_cfg)
             out = projector.project_feature(feature=feature, image_path=image_path)
 
-        transformed.append(_score_one_feature(out, score_cfg=score_cfg))
+        out = _score_one_feature(out, score_cfg=score_cfg)
+        if score_threshold > 0 and out.get("score", 0.0) < score_threshold:
+            filtered += 1
+            continue
+        transformed.append(out)
+        pbar.set_postfix(kept=len(transformed), filtered=filtered)
 
     return transformed

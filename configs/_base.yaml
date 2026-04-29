@@ -1,6 +1,11 @@
 distributed:
   enabled: true
-  backend: nccl
+  backend: gloo
+
+pipeline:
+  # If false, skip model inference/projection and directly consume existing
+  # per-image shapefiles from output.per_image_shp_dir for postprocess stages.
+  run_inference: true
 
 model:
   name: sam3
@@ -19,7 +24,7 @@ data:
 inference:
   text_prompt: "a PV Panel"
   dataloader:
-    batch_size: 4
+    batch_size: 16
     num_workers: 2
     pin_memory: true
   slicing:
@@ -34,8 +39,8 @@ inference:
     # If true, only windows with valid prompt boxes are inferred.
     strict_window_prompt: false
   early_filter:
-    min_score: 0.2
-    min_area_px: 10.0
+    min_score: 0.45
+    min_area_px: 500.0
 
 projection:
   # mode: dom | oblique | auto
@@ -72,21 +77,32 @@ projection:
     area_beta: 0.8
     ratio_beta: 0.35
     shape_beta: 0.2
-    # legacy_gaussian params
-    area_target: 2.42
-    mu_r: 2.03
-    sigma_r: 0.2
-    beta: 0.25
+
+    # # legacy_gaussian params
+    # area_target: 2.42
+    # mu_r: 2.03
+    # sigma_r: 0.2
+    # beta: 0.25
+
     combine_mode: weighted
     gamma: 1.0
     product_use_shape: true
-    w_area: 1.0
-    w_ratio: 1.0
-    w_shape: 1.0
-    w_sem: 0.4
-    w_pv: 0.6
+    w_area: 15.0
+    w_ratio: 10.0
+    w_shape: 5.0
+    w_sem: 0.2
+    w_pv: 0.8
+    # Drop features with con_weight below this threshold right after scoring.
+    # Set to 0.0 to disable early filtering.
+    score_threshold: 0.7
 
 postprocess:
+  view_selection:
+    enabled: true
+    view_num: 5
+    iou_threshold: 0.1
+    use_geometry_iou: true
+    random_seed: 42
   multiview:
     enabled: true
     strategy: nms_keep_max

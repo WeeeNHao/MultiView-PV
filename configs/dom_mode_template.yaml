@@ -8,8 +8,16 @@ data:
   image_path:
     - /path/to/dom/DOM.tif
 
-# DOM-only run normally does not merge with dom_shp again
+# DOM-only run: single image, no multi-view selection needed.
+# NMS still runs to suppress overlapping detections from sliding window.
 postprocess:
+  view_selection:
+    enabled: false
+  multiview:
+    enabled: true
+    strategy: nms_keep_max
+    score_field: con_weight
+    iou_threshold: 0.2
   dom_merge:
     enabled: false
 

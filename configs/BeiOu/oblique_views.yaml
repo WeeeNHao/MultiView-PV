@@ -1,0 +1,51 @@
+_base_:
+  - "./base.yaml"
+
+pipeline:
+  run_inference: false
+
+
+data:
+  data_root: "/data/dataset/PV/001-BeiOu/"
+  image_glob: "images/*.JPG"
+
+postprocess:
+  per_image_nms:
+    enabled: false
+    backend: auto
+    score_field: con_weight
+    iou_threshold: 0.25
+    use_geometry_iou: false
+
+  view_selection: 
+    enabled: false
+    view_num: 5
+    iou_threshold: 0.25
+    use_geometry_iou: false
+    random_seed: 42
+
+  multiview:
+    enabled: false
+    strategy: nms_keep_max
+    score_field: con_weight
+    iou_threshold: 0.2
+
+  prompt_export:
+    enabled: true
+    mode: oblique
+    output_dir: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/prompts/
+    min_size: 50
+    include_intersections: true
+    use_spatial_index: true
+
+  dom_merge:
+    enabled: false
+
+output:
+  per_image_shp_dir: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/infer/
+  final_merged_shp: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/view_1.shp
+  trace_exports:
+    enabled: false
+    collected_shp: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/view_1collected.shp
+    selected_shp: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/view_1selected.shp
+  

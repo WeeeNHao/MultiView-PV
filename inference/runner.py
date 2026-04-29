@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from utils.common import Feature, FeatureList, GeoMeta
 from inference.models.base import DetectionModelAdapter
@@ -142,7 +143,11 @@ class InferenceRunner:
         self.prompt_enabled = bool(self.prompt_cfg.get("enabled", False))
         self.strict_window_prompt = bool(self.prompt_cfg.get("strict_window_prompt", False))
 
-    def run_image(self, image_path: str) -> Tuple[FeatureList, GeoMeta]:
+    def run_image(
+        self,
+        image_path: str,
+        progress_position: int = 1,
+    ) -> Tuple[FeatureList, GeoMeta]:
         dataset = SlidingWindowDataset(
             image_path=image_path,
             slicing_cfg=self.slicing_cfg,
@@ -159,7 +164,12 @@ class InferenceRunner:
 
         all_features: FeatureList = []
 
-        for batch in dataloader:
+        for batch in tqdm(
+            dataloader,
+            desc="Inferring sliding windows",
+            leave=False,
+            position=progress_position,
+        ):
             images = batch["images"]
             offsets = batch["offsets"]
             prompts = batch["geometry_prompts"]

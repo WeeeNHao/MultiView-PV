@@ -4,6 +4,7 @@ import os
 from typing import Any, List, Optional, Sequence, Tuple
 
 from osgeo import ogr
+from tqdm import tqdm
 
 from utils.common import Feature, FeatureList
 
@@ -93,7 +94,7 @@ def export_features_to_shapefile(
     for name, ftype in fields:
         layer.CreateField(ogr.FieldDefn(name, ftype))
 
-    for idx, feature in enumerate(features):
+    for idx, feature in enumerate(tqdm(features, desc="Writing shapefile", leave=False)):
         geom = _segmentation_to_polygon(feature.get("segmentation"))
         if geom is None:
             geom = _bbox_to_polygon(feature.get("bbox", []))
@@ -176,8 +177,9 @@ def read_features_from_shapefile(
     defn = layer.GetLayerDefn()
     field_names = {defn.GetFieldDefn(i).GetName() for i in range(defn.GetFieldCount())}
 
+    feature_count = layer.GetFeatureCount()
     features: FeatureList = []
-    for feat in layer:
+    for feat in tqdm(layer, total=feature_count, desc="Reading shapefile", leave=False):
         geom = feat.GetGeometryRef()
         if geom is None or geom.IsEmpty():
             continue
@@ -201,6 +203,7 @@ def read_features_from_shapefile(
             {
                 "bbox": bbox,
                 "segmentation": seg,
+                "geom": geom.Clone(),
                 "label": label,
                 "src": src,
                 "con_sem": con_sem,

@@ -1,0 +1,21 @@
+_base_:
+  - ../_base.yaml
+
+projection:
+  oblique:
+    avg_alt: 37.5
+    pose_csv: "/data/dataset/PV/003-XinXie/CAM/pose.csv"
+    dsm_path: "/data/dataset/PV/003-XinXie/dsm/DSM.tif"
+    preload_dsm: true
+
+  score:
+    mode: standard
+    target_length: 2.16
+    target_width: 1.10
+    area_beta: 0.25
+    ratio_beta: 0.2
+    shape_beta: 0.1
+    w_area: 10.0
+    w_ratio: 5.0
+    w_shape: 5.0
+  

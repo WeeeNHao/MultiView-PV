@@ -9,6 +9,20 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
+from tqdm import tqdm as _tqdm_cls
+
+
+class TqdmLoggingHandler(logging.Handler):
+    """Logging handler that routes output through ``tqdm.write`` so that
+    log messages do not break the progress bar display."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            _tqdm_cls.write(msg)
+        except Exception:
+            self.handleError(record)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -40,8 +54,9 @@ class PipelineRunLogger:
         self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
+        self._tqdm_bar = None  # optional reference to a tqdm bar for postfix updates
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
+            handler = TqdmLoggingHandler()
             formatter = logging.Formatter(
                 "[%(asctime)s] [%(levelname)s] [rank=%(rank)s] %(message)s"
             )
@@ -65,6 +80,13 @@ class PipelineRunLogger:
             with open(self.events_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
+    def set_tqdm(self, bar: Any) -> None:
+        """Attach a tqdm progress bar for postfix updates during loops."""
+        self._tqdm_bar = bar
+
+    def clear_tqdm(self) -> None:
+        self._tqdm_bar = None
+
     def info(self, message: str, **fields: Any) -> None:
         extra = {"rank": self.rank}
         if fields:
@@ -72,6 +94,11 @@ class PipelineRunLogger:
             self.logger.info(f"{message} {detail}", extra=extra)
         else:
             self.logger.info(message, extra=extra)
+
+    def update_postfix(self, **fields: Any) -> None:
+        """Update the attached tqdm bar's postfix (no-op if no bar)."""
+        if self._tqdm_bar is not None:
+            self._tqdm_bar.set_postfix(fields, refresh=True)
 
     @contextmanager
     def stage(self, name: str, **fields: Any) -> Iterator[None]:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+from tqdm import tqdm
+
 from postprocess.nms import nms_features
 
 
@@ -9,16 +11,7 @@ def _score_of(feature: Dict[str, Any], score_field: str) -> float:
     return float(feature.get(score_field, 0.0))
 
 
-def _ensure_conf_fields(feature: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(feature)
-    con_sem = float(out.get("con_sem", out.get("score", 0.0)))
-    con_pv = float(out.get("con_pv", 0.0))
-    con_weight = float(out.get("con_weight", con_sem))
-    out["con_sem"] = con_sem
-    out["con_pv"] = con_pv
-    out["con_weight"] = con_weight
-    out["score"] = con_weight
-    return out
+
 
 
 def _cluster_by_iou(
@@ -29,7 +22,8 @@ def _cluster_by_iou(
     ordered = sorted(features, key=lambda x: _score_of(x, score_field), reverse=True)
     clusters: List[List[Dict[str, Any]]] = []
 
-    for item in ordered:
+    pbar = tqdm(ordered, desc="Clustering features", leave=False)
+    for item in pbar:
         attached = False
         for cluster in clusters:
             head = cluster[0]
@@ -41,6 +35,7 @@ def _cluster_by_iou(
                 break
         if not attached:
             clusters.append([item])
+        pbar.set_postfix(clusters=len(clusters))
     return clusters
 
 
@@ -62,7 +57,7 @@ def fuse_multiview_features(
     iou_threshold = float(cfg.get("iou_threshold", 0.2))
     strategy = str(cfg.get("strategy", "nms_keep_max")).lower()
 
-    normalized = [_ensure_conf_fields(item) for item in features]
+    normalized = features
 
     if strategy == "nms_keep_max":
         return nms_features(
@@ -117,27 +112,38 @@ def merge_image_with_dom_features(
     score_field = str(cfg.get("score_field", "con_weight"))
     iou_threshold = float(cfg.get("iou_threshold", 0.2))
 
-    merged = [_ensure_conf_fields(item) for item in image_features]
-    dom_norm = [_ensure_conf_fields(item) for item in dom_features]
+    merged = list(image_features)
+    dom_norm = dom_features
+    added = 0
+    replaced = 0
 
-    for dom_item in dom_norm:
+    pbar = tqdm(dom_norm, desc="DOM merge", leave=False)
+    for dom_item in pbar:
         best_idx = _best_match_index(dom_item, merged, iou_threshold=iou_threshold, score_field=score_field)
 
         if best_idx < 0:
             merged.append(dom_item)
+            added += 1
+            pbar.set_postfix(added=added, replaced=replaced)
             continue
 
         if strategy == "union":
             merged.append(dom_item)
+            added += 1
+            pbar.set_postfix(added=added, replaced=replaced)
             continue
 
         if strategy == "prefer_dom":
             merged[best_idx] = dom_item
+            replaced += 1
+            pbar.set_postfix(added=added, replaced=replaced)
             continue
 
         if strategy == "confidence":
             if _score_of(dom_item, score_field) > _score_of(merged[best_idx], score_field):
                 merged[best_idx] = dom_item
+                replaced += 1
+            pbar.set_postfix(added=added, replaced=replaced)
             continue
 
         raise ValueError(f"Unsupported dom merge strategy: {strategy}")

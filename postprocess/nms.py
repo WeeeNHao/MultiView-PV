@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import os
+import uuid
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+from tqdm import tqdm
+
 from osgeo import ogr
+
+try:
+    from rtree import index as _rtree_index
+except Exception:
+    _rtree_index = None
 
 
 def _bbox_iou(b1: Sequence[float], b2: Sequence[float]) -> float:
@@ -31,8 +40,12 @@ def _flat_to_pairs(coords: Iterable[float]) -> List[Tuple[float, float]]:
 
 
 def _feature_to_geometry(feature: Dict[str, Any]) -> ogr.Geometry | None:
+    if "geom" in feature and feature["geom"] is not None:
+        return feature["geom"]
+
     seg = feature.get("segmentation")
     if not seg:
+        feature["geom"] = None
         return None
 
     poly = ogr.Geometry(ogr.wkbPolygon)
@@ -52,7 +65,9 @@ def _feature_to_geometry(feature: Dict[str, Any]) -> ogr.Geometry | None:
             poly.AddGeometry(ring)
 
     if poly.IsEmpty():
+        feature["geom"] = None
         return None
+    feature["geom"] = poly
     return poly
 
 
@@ -69,10 +84,9 @@ def _geometry_iou(f1: Dict[str, Any], f2: Dict[str, Any]) -> float:
     if inter_area <= 0:
         return 0.0
 
-    union = g1.Union(g2)
-    if union is None or union.IsEmpty():
-        return 0.0
-    union_area = union.Area()
+    g1_area = g1.Area()
+    g2_area = g2.Area()
+    union_area = g1_area + g2_area - inter_area
     if union_area <= 0:
         return 0.0
     return float(inter_area / union_area)
@@ -83,14 +97,55 @@ def nms_features(
     score_field: str,
     iou_threshold: float,
     use_geometry_iou: bool = False,
+    backend: str = "rtree",
+) -> List[Dict[str, Any]]:
+    backend_name = str(backend).strip().lower()
+    if backend_name == "rtree":
+        return _nms_features_rtree(
+            features=features,
+            score_field=score_field,
+            iou_threshold=iou_threshold,
+            use_geometry_iou=use_geometry_iou,
+        )
+    if backend_name == "naive":
+        return _nms_features_naive(
+            features=features,
+            score_field=score_field,
+            iou_threshold=iou_threshold,
+            use_geometry_iou=use_geometry_iou,
+        )
+    if backend_name == "auto":
+        if _rtree_index is not None:
+            return _nms_features_rtree(
+                features=features,
+                score_field=score_field,
+                iou_threshold=iou_threshold,
+                use_geometry_iou=use_geometry_iou,
+            )
+        return _nms_features_naive(
+            features=features,
+            score_field=score_field,
+            iou_threshold=iou_threshold,
+            use_geometry_iou=use_geometry_iou,
+        )
+    raise ValueError(f"Unsupported NMS backend: {backend}")
+
+
+def _nms_features_naive(
+    features: List[Dict[str, Any]],
+    score_field: str,
+    iou_threshold: float,
+    use_geometry_iou: bool,
 ) -> List[Dict[str, Any]]:
     if not features:
         return []
 
     ordered = sorted(features, key=lambda x: float(x.get(score_field, 0.0)), reverse=True)
     kept: List[Dict[str, Any]] = []
+    suppressed_count = 0
 
-    for cand in ordered:
+    pbar = tqdm(ordered, desc="NMS", leave=False)
+    for cand in pbar:
         suppressed = False
         for base in kept:
             if use_geometry_iou:
@@ -102,4 +157,67 @@ def nms_features(
                 break
         if not suppressed:
             kept.append(cand)
+        else:
+            suppressed_count += 1
+        pbar.set_postfix(kept=len(kept), drop=suppressed_count)
+    return kept
+
+
+def _nms_features_rtree(
+    features: List[Dict[str, Any]],
+    score_field: str,
+    iou_threshold: float,
+    use_geometry_iou: bool,
+) -> List[Dict[str, Any]]:
+    if not features:
+        return []
+    if _rtree_index is None:
+        return _nms_features_naive(
+            features=features,
+            score_field=score_field,
+            iou_threshold=iou_threshold,
+            use_geometry_iou=use_geometry_iou,
+        )
+
+    ordered = sorted(features, key=lambda x: float(x.get(score_field, 0.0)), reverse=True)
+    kept: List[Dict[str, Any]] = []
+    suppressed_count = 0
+
+    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    index_path = os.path.join(tmp_dir, f"nms_rtree_{uuid.uuid4().hex}")
+
+    idx = _rtree_index.Index(index_path)
+    try:
+        pbar = tqdm(ordered, desc="NMS", leave=False)
+        for cand in pbar:
+            suppressed = False
+            cand_bbox = tuple(float(v) for v in cand["bbox"])
+            candidate_kept_ids = list(idx.intersection(cand_bbox))
+
+            for kept_id in candidate_kept_ids:
+                base = kept[kept_id]
+                if use_geometry_iou:
+                    iou = _geometry_iou(cand, base)
+                else:
+                    iou = _bbox_iou(cand["bbox"], base["bbox"])
+                if iou > iou_threshold:
+                    suppressed = True
+                    break
+
+            if not suppressed:
+                kept.append(cand)
+                idx.insert(len(kept) - 1, cand_bbox)
+            else:
+                suppressed_count += 1
+            pbar.set_postfix(kept=len(kept), drop=suppressed_count)
+    finally:
+        idx.close()
+        for ext in (".dat", ".idx"):
+            fpath = index_path + ext
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                except OSError:
+                    pass
     return kept

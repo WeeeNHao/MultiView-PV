@@ -118,14 +118,18 @@ class ObliqueProjector:
     ) -> List[Tuple[float, float]]:
         xs, ys, zs, phi, omega, kappa = pose
         rot = build_rotation(phi, omega, kappa)
+        a1, a2, a3, b1, b2, b3, c1, c2, c3 = rot
 
-        out: List[Tuple[float, float]] = []
-        for x, y in points_xy:
-            px = x - self.cx
-            py = self.cy - y
-            gx, gy = photo_to_ground(px, py, self.focal, self.avg_alt, xs, ys, zs, rot)
-            out.append((gx, gy))
-        return out
+        pts = np.array(points_xy, dtype=np.float64)
+        px = pts[:, 0] - self.cx
+        py = self.cy - pts[:, 1]
+
+        den = c1 * px + c2 * py - c3 * self.focal
+        den = np.where(np.abs(den) < 1e-12, 1e-12, den)
+        gx = (self.avg_alt - zs) * (a1 * px + a2 * py - a3 * self.focal) / den + xs
+        gy = (self.avg_alt - zs) * (b1 * px + b2 * py - b3 * self.focal) / den + ys
+
+        return list(zip(gx.tolist(), gy.tolist()))
 
     def _build_affine_pairs(
         self,
@@ -138,59 +142,97 @@ class ObliqueProjector:
         x1, y1, x2, y2 = [float(v) for v in bbox]
         margin = float(self.search_margin_px)
 
-        corners = [
-            (x1 - margin, y1 - margin),
-            (x1 - margin, y2 + margin),
-            (x2 + margin, y2 + margin),
-            (x2 + margin, y1 - margin),
-        ]
+        # Vectorized corner projection
+        corner_px = np.array([x1 - margin, x1 - margin, x2 + margin, x2 + margin]) - self.cx
+        corner_py = self.cy - np.array([y1 - margin, y2 + margin, y2 + margin, y1 - margin])
+        a1, a2, a3, b1, b2, b3, c1, c2, c3 = rot
+        den = c1 * corner_px + c2 * corner_py - c3 * self.focal
+        den = np.where(np.abs(den) < 1e-12, 1e-12, den)
+        corner_gx = (self.avg_alt - zs) * (a1 * corner_px + a2 * corner_py - a3 * self.focal) / den + xs
+        corner_gy = (self.avg_alt - zs) * (b1 * corner_px + b2 * corner_py - b3 * self.focal) / den + ys
 
-        approx_ground: List[Tuple[float, float]] = []
-        for ix, iy in corners:
-            px = ix - self.cx
-            py = self.cy - iy
-            gx, gy = photo_to_ground(px, py, self.focal, self.avg_alt, xs, ys, zs, rot)
-            approx_ground.append((gx, gy))
+        gx_min, gx_max = float(corner_gx.min()), float(corner_gx.max())
+        gy_min, gy_max = float(corner_gy.min()), float(corner_gy.max())
 
-        gx_vals = [p[0] for p in approx_ground]
-        gy_vals = [p[1] for p in approx_ground]
-        gx_min, gx_max = min(gx_vals), max(gx_vals)
-        gy_min, gy_max = min(gy_vals), max(gy_vals)
+        gt = self._dsm_geo
+        c0, r0 = geo_to_image_xy(gt, gx_min, gy_max)
+        c1r, r1r = geo_to_image_xy(gt, gx_max, gy_min)
 
-        c0, r0 = geo_to_image_xy(self._dsm_geo, gx_min, gy_max)
-        c1, r1 = geo_to_image_xy(self._dsm_geo, gx_max, gy_min)
-
-        col_min = max(0, min(int(min(c0, c1)), self._dsm_w - 1))
-        col_max = max(0, min(int(max(c0, c1)), self._dsm_w - 1))
-        row_min = max(0, min(int(min(r0, r1)), self._dsm_h - 1))
-        row_max = max(0, min(int(max(r0, r1)), self._dsm_h - 1))
+        col_min = max(0, min(int(min(c0, c1r)), self._dsm_w - 1))
+        col_max = max(0, min(int(max(c0, c1r)), self._dsm_w - 1))
+        row_min = max(0, min(int(min(r0, r1r)), self._dsm_h - 1))
+        row_max = max(0, min(int(max(r0, r1r)), self._dsm_h - 1))
 
         if col_min >= col_max or row_min >= row_max:
             return [], []
 
-        src_pts: List[Tuple[float, float]] = []
-        dst_pts: List[Tuple[float, float]] = []
+        step = max(1, self.sample_interval)
 
-        for col in range(col_min, col_max + 1, max(1, self.sample_interval)):
-            for row in range(row_min, row_max + 1, max(1, self.sample_interval)):
-                z = self._read_dsm_value(col, row)
-                if z is None:
-                    continue
-                if abs(z - self.avg_alt) > self.max_alt_diff:
-                    continue
+        # Read DSM block at once
+        block_w = col_max - col_min + 1
+        block_h = row_max - row_min + 1
+        if self._dsm_array is not None:
+            dsm_block = self._dsm_array[row_min:row_min + block_h, col_min:col_min + block_w]
+        else:
+            dsm_block = self._dsm_ds.ReadAsArray(col_min, row_min, block_w, block_h)
+        if dsm_block is None:
+            return [], []
 
-                gx, gy = image_xy_to_geo(self._dsm_geo, col, row)
-                px, py = ground_to_photo(self.focal, gx, gy, z, xs, ys, zs, rot)
-                ix = px + self.cx
-                iy = self.cy - py
+        # Build sampled grid indices (local to block)
+        local_cols = np.arange(0, block_w, step)
+        local_rows = np.arange(0, block_h, step)
+        cc, rr = np.meshgrid(local_cols, local_rows)
+        cc_flat = cc.ravel()
+        rr_flat = rr.ravel()
 
-                if ix < 0 or iy < 0 or ix > self.image_width or iy > self.image_height:
-                    continue
-                if not (x1 <= ix <= x2 and y1 <= iy <= y2):
-                    continue
+        # Read Z values with numpy indexing
+        z_vals = dsm_block[rr_flat, cc_flat].astype(np.float64)
 
-                src_pts.append((ix, iy))
-                dst_pts.append((gx, gy))
+        # Filter by altitude
+        alt_mask = np.abs(z_vals - self.avg_alt) <= self.max_alt_diff
+        cc_valid = cc_flat[alt_mask]
+        rr_valid = rr_flat[alt_mask]
+        z_valid = z_vals[alt_mask]
+
+        if len(z_valid) == 0:
+            return [], []
+
+        # Absolute DSM col/row
+        abs_cols = (cc_valid + col_min).astype(np.float64)
+        abs_rows = (rr_valid + row_min).astype(np.float64)
+
+        # Vectorized imagexy2geo
+        gx = gt[0] + abs_cols * gt[1] + abs_rows * gt[2]
+        gy = gt[3] + abs_cols * gt[4] + abs_rows * gt[5]
+
+        # Vectorized ground_to_photo
+        dx = gx - xs
+        dy = gy - ys
+        dz = z_valid - zs
+        den2 = a3 * dx + b3 * dy + c3 * dz
+        den2 = np.where(np.abs(den2) < 1e-12, 1e-12, den2)
+        px = -self.focal * (a1 * dx + b1 * dy + c1 * dz) / den2
+        py = -self.focal * (a2 * dx + b2 * dy + c2 * dz) / den2
+
+        # Photo coords to image coords
+        img_x = px + self.cx
+        img_y = self.cy - py
+
+        # Filter: in image bounds and in bbox
+        valid = (
+            (img_x >= 0) & (img_y >= 0)
+            & (img_x <= self.image_width) & (img_y <= self.image_height)
+            & (img_x >= x1) & (img_x <= x2)
+            & (img_y >= y1) & (img_y <= y2)
+        )
+
+        img_x = img_x[valid]
+        img_y = img_y[valid]
+        gx = gx[valid]
+        gy = gy[valid]
+
+        src_pts = list(zip(img_x.tolist(), img_y.tolist()))
+        dst_pts = list(zip(gx.tolist(), gy.tolist()))
 
         return src_pts, dst_pts
 

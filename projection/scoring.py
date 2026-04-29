@@ -4,7 +4,9 @@ import math
 from typing import Any, Dict
 
 from osgeo import ogr
-
+from shapely.wkb import loads as load_wkb
+from shapely import Polygon
+import numpy as np
 
 def _safe_exp_decay(delta: float, beta: float) -> float:
     beta = max(beta, 1e-6)
@@ -13,29 +15,40 @@ def _safe_exp_decay(delta: float, beta: float) -> float:
 
 def _safe_gaussian(delta: float, sigma: float) -> float:
     sigma = max(sigma, 1e-6)
-    return float(math.exp(-((delta * delta) / (2.0 * sigma * sigma))))
+    return float(math.exp(-((delta * delta)  / (2.0 * sigma * sigma))))
 
 
-def _aspect_ratio_from_envelope(geom: ogr.Geometry) -> float:
-    env = geom.GetEnvelope()
-    width = max(float(env[1] - env[0]), 0.0)
-    height = max(float(env[3] - env[2]), 0.0)
-    if width <= 0 or height <= 0:
-        return 0.0
-    return max(width / height, height / width)
+def _get_rect_info(geom: ogr.Geometry, ref: str = "min_rect") -> tuple[float, float, float]:
+    """Returns (width, height, rect_area). ref can be 'min_rect' or 'bbox'."""
+    if ref == "bbox":
+        env = geom.GetEnvelope()
+        w = max(float(env[1] - env[0]), 0.0)
+        h = max(float(env[3] - env[2]), 0.0)
+        return w, h, w * h
+
+    try:
+        poly = Polygon(geom.GetGeometryRef(0).GetPoints())
+        if not poly.is_valid or poly.area <= 0:
+            return 0.0, 0.0, 0.0
+        
+        min_rect = poly.minimum_rotated_rectangle
+        distance_edges = min_rect.exterior.coords[:-1]
+        if len(distance_edges) != 4:
+            return 0.0, 0.0, 0.0
+        edge_lengths = [np.linalg.norm(np.array(distance_edges[i]) - np.array(distance_edges[(i + 1) % 4])) for i in range(4)]
+        edge_lengths.sort()
+        w = edge_lengths[0]
+        h = edge_lengths[2]
+        return w, h, min_rect.area
+    except Exception:
+        return 0.0, 0.0, 0.0
 
 
-def _shape_rectangularity_score(geom: ogr.Geometry, shape_beta: float) -> float:
-    env = geom.GetEnvelope()
-    width = max(float(env[1] - env[0]), 0.0)
-    height = max(float(env[3] - env[2]), 0.0)
-    rect_area = width * height
+def _shape_rectangularity_score(area: float, rect_area: float, shape_beta: float) -> float:
     if rect_area <= 0:
         return 0.0
-
-    area = max(float(geom.Area()), 0.0)
-    rectangularity = min(max(area / rect_area, 0.0), 1.0)
-    return _safe_exp_decay(1.0 - rectangularity, shape_beta)
+    ratio = area / rect_area
+    return _safe_exp_decay(ratio - 1.0, shape_beta)
 
 
 def _combine_scores(
@@ -64,48 +77,38 @@ def compute_pv_geometry_score(
     score_cfg: Dict[str, Any],
 ) -> Dict[str, float]:
     area = max(float(geom.Area()), 0.0)
-    ratio = _aspect_ratio_from_envelope(geom)
+    rect_mode = str(score_cfg.get("rect_mode", "min_rect")).lower()
+    w, h, rect_area = _get_rect_info(geom, ref=rect_mode)
+    ratio = max(w / h, h / w) if w > 0 and h > 0 else 0.0
 
-    mode = str(score_cfg.get("mode", "standard")).lower()
-    if mode in {"legacy", "legacy_gaussian", "legacy_weighted"}:
-        area_target = float(score_cfg.get("area_target", 2.42))
-        if area_target <= 0:
-            target_length = float(score_cfg.get("target_length", 2.2))
-            target_width = float(score_cfg.get("target_width", 1.1))
-            area_target = max(target_length * target_width, 1e-6)
+    # -- Size Target --
+    area_target = float(score_cfg.get("area_target", -1.0))
+    if area_target <= 0:
+        target_length = float(score_cfg.get("target_length", 2.2))
+        target_width = float(score_cfg.get("target_width", 1.1))
+        area_target = max(target_length * target_width, 1e-6)
 
-        mu_r = float(score_cfg.get("mu_r", 2.03))
-        sigma_r = float(score_cfg.get("sigma_r", 0.2))
-        beta = float(score_cfg.get("beta", 0.25))
-        shape_beta = float(score_cfg.get("shape_beta", 0.1))
+    # -- Ratio Target --
+    mu_r = float(score_cfg.get("mu_r", -1.0))
+    if mu_r <= 0:
+        target_length = float(score_cfg.get("target_length", 2.2))
+        target_width = float(score_cfg.get("target_width", 1.1))
+        mu_r = max(target_length / max(target_width, 1e-6), 1e-6)
 
-        area_score = _safe_exp_decay(area - area_target, area_target * beta)
-        ratio_score = _safe_gaussian(ratio - mu_r, sigma_r)
-        shape_score = _shape_rectangularity_score(geom, shape_beta=shape_beta)
-        con_pv = _combine_scores(area_score, ratio_score, shape_score, score_cfg)
+    # -- Betas / Sigmas --
+    # Handle both new (_beta) and old configs
+    area_beta = float(score_cfg.get("area_beta", score_cfg.get("beta", 0.35)))
+    sigma_r = float(score_cfg.get("sigma_r", score_cfg.get("ratio_beta", 0.2)))
+    shape_beta = float(score_cfg.get("shape_beta", 0.1))
 
-        return {
-            "area": area,
-            "aspect_ratio": ratio,
-            "area_score": area_score,
-            "ratio_score": ratio_score,
-            "shape_score": shape_score,
-            "con_pv": float(con_pv),
-        }
+    # -- Individual Scores --
+    area_score = _safe_exp_decay(area - area_target, area_target * area_beta)
+    ratio_score = _safe_gaussian(ratio - mu_r, sigma_r)
+    shape_score = _shape_rectangularity_score(area, rect_area, shape_beta=shape_beta)
 
-    target_length = float(score_cfg.get("target_length", 2.2))
-    target_width = float(score_cfg.get("target_width", 1.1))
-    target_area = max(target_length * target_width, 1e-6)
-    target_ratio = max(target_length / max(target_width, 1e-6), 1e-6)
-
-    area_beta = float(score_cfg.get("area_beta", 0.8)) * target_area
-    ratio_beta = float(score_cfg.get("ratio_beta", 0.35)) * target_ratio
-    shape_beta = float(score_cfg.get("shape_beta", 0.2))
-
-    area_score = _safe_exp_decay(area - target_area, area_beta)
-    ratio_score = _safe_exp_decay(ratio - target_ratio, ratio_beta)
-    shape_score = _shape_rectangularity_score(geom, shape_beta=shape_beta)
+    # -- Combined Score --
     con_pv = _combine_scores(area_score, ratio_score, shape_score, score_cfg)
+
     return {
         "area": area,
         "aspect_ratio": ratio,
