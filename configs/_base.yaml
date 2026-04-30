@@ -1,6 +1,6 @@
 distributed:
   enabled: true
-  backend: gloo
+  backend: nccl
 
 pipeline:
   # If false, skip model inference/projection and directly consume existing

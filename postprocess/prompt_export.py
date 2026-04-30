@@ -155,6 +155,60 @@ def _oblique_prompt_bbox(
     return [min(xs_px), min(ys_px), max(xs_px), max(ys_px)]
 
 
+def _oblique_feature_geo_points(
+    geom: ogr.Geometry,
+    dsm: gdal.Dataset,
+    dsm_transform: Tuple[float, ...],
+    default_alt: float,
+) -> Optional[List[Tuple[float, float, float]]]:
+    ring = geom.GetGeometryRef(0)
+    if ring is None:
+        return None
+    poly = Polygon(ring.GetPoints())
+    rotated_rec = poly.minimum_rotated_rectangle
+    coords = rotated_rec.exterior.coords
+    if len(coords) < 4:
+        return None
+
+    corners = coords[:4]
+    dsm_pixels = [geo_to_image_xy(dsm_transform, x, y) for x, y in corners]
+
+    def get_z(col: float, row: float) -> float:
+        try:
+            arr = dsm.ReadAsArray(int(col), int(row), 1, 1)
+            return float(arr[0][0])
+        except Exception:
+            return default_alt
+
+    geo_points: List[Tuple[float, float, float]] = []
+    for col, row in dsm_pixels:
+        z = get_z(col, row)
+        gx, gy = image_xy_to_geo(dsm_transform, col, row)
+        geo_points.append((gx, gy, z))
+
+    return geo_points
+
+
+def _oblique_prompt_bbox_from_geo_points(
+    geo_points: List[Tuple[float, float, float]],
+    pose: Tuple[float, float, float, Tuple[float, ...]],
+    oblique_cfg: Dict[str, Any],
+) -> List[float]:
+    f = float(oblique_cfg.get("focal", 3713.29))
+    cx = float(oblique_cfg.get("cx", 2647.02))
+    cy = float(oblique_cfg.get("cy", 1969.28))
+    xs, ys, zs, rot = pose
+
+    img_pts: List[Tuple[float, float]] = []
+    for gx, gy, z in geo_points:
+        u, v = ground_to_photo(f, gx, gy, z, xs, ys, zs, rot)
+        img_pts.append((u + cx, cy - v))
+
+    xs_px = [p[0] for p in img_pts]
+    ys_px = [p[1] for p in img_pts]
+    return [min(xs_px), min(ys_px), max(xs_px), max(ys_px)]
+
+
 def _export_oblique_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict[str, Any]) -> Dict[str, Any]:
     projection_cfg = _as_dict(cfg, "projection")
     oblique_cfg = _as_dict(projection_cfg, "oblique")
@@ -211,6 +265,19 @@ def _export_oblique_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict
 
     footprint_index = _ObliqueFootprintIndex(footprint_boxes) if (include_intersections and use_spatial_index) else None
 
+    pose_cache: Dict[str, Tuple[float, float, float, Tuple[float, ...]]] = {}
+    for name in candidate_names:
+        pose_params = pose_dict.get(name)
+        if not pose_params:
+            continue
+        try:
+            xs, ys, zs = float(pose_params[0]), float(pose_params[1]), float(pose_params[2])
+            phi, omega, kappa = float(pose_params[3]), float(pose_params[4]), float(pose_params[5])
+        except Exception:
+            continue
+        rot = build_rotation(phi, omega, kappa)
+        pose_cache[name] = (xs, ys, zs, rot)
+
     results: Dict[str, List[List[float]]] = defaultdict(list)
     shp_ds = ogr.Open(shp_path)
     if shp_ds is None:
@@ -222,6 +289,9 @@ def _export_oblique_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict
         if geom is None:
             continue
 
+        if float(feat.GetFieldAsString("con")) < 0.8:
+            continue
+        
         src = _normalize_image_name(feat.GetFieldAsString("src")) if feat.GetFieldIndex("src") != -1 else ""
         target_set = set()
         if src and src in pose_dict:
@@ -247,18 +317,28 @@ def _export_oblique_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict
             continue
         targets: List[str] = list(target_set)
 
+        geo_points = _oblique_feature_geo_points(
+            geom=geom,
+            dsm=dsm_ds,
+            dsm_transform=dsm_transform,
+            default_alt=avg_alt,
+        )
+        if not geo_points:
+            continue
+
         for photo in targets:
             try:
-                bbox = _oblique_prompt_bbox(
-                    pose_params=pose_dict[photo],
-                    dsm=dsm_ds,
-                    dsm_transform=dsm_transform,
-                    geom=geom,
+                pose = pose_cache.get(photo)
+                if pose is None:
+                    continue
+                bbox = _oblique_prompt_bbox_from_geo_points(
+                    geo_points=geo_points,
+                    pose=pose,
                     oblique_cfg=oblique_cfg,
                 )
-                if any(v < 0 for v in bbox):
-                    continue
                 if (bbox[2] - bbox[0]) < min_size or (bbox[3] - bbox[1]) < min_size:
+                    continue
+                if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > image_width or bbox[3] > image_height:
                     continue
                 results[photo].append(bbox)
             except Exception:
@@ -399,6 +479,8 @@ def _export_dom_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict[str
         if bbox is None:
             continue
         if (bbox[2] - bbox[0]) < min_size or (bbox[3] - bbox[1]) < min_size:
+            continue
+        if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > width or bbox[3] > height:
             continue
         bboxes.append(bbox)
 

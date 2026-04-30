@@ -93,6 +93,8 @@ def select_views_from_features(
     selected_features: List[Dict[str, Any]] = []
     for cluster in clusters:
         cluster_list = list(cluster)
+        if len(cluster_list) <= 2:
+            continue
         k = min(len(cluster_list), view_num)
         selected_indices = rng.sample(cluster_list, k=k)
         for idx_sel in selected_indices:

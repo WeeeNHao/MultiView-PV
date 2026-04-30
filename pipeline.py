@@ -278,10 +278,11 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
         nms_before_total = 0
         nms_after_total = 0
         nms_elapsed = 0.0
+        all_features: FeatureList = []
         if per_image_nms_enabled and not os.path.exists(trace_collected_shp):
             with run_logger.stage("collect_per_image_outputs"):
                 shp_files = _collect_rank_outputs(per_image_dir)
-                all_features: FeatureList = []
+
                 pbar_shp = tqdm(shp_files, desc="Reading shapefiles")
                 for shp in pbar_shp:
                     per_image_features = read_features_from_shapefile(shp_path=shp)
@@ -318,10 +319,9 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
                 )
             run_logger.info("collected trace output", out_shp=trace_collected_shp, count=len(all_features))
 
-        if os.path.exists(trace_collected_shp):
+        if trace_enabled and os.path.exists(trace_collected_shp):
             all_features = read_features_from_shapefile(shp_path=trace_collected_shp)
             run_logger.info("collected trace exists, loaded features", count=len(all_features))
-
         
         view_selection_cfg = _as_dict(post_cfg, "view_selection")
         if bool(view_selection_cfg.get("enabled", False)):
@@ -386,14 +386,14 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
             run_logger.log_count_change("dom_merge", before, after, dom_shp=dom_shp)
             run_logger.info("after dom merge", count=after, delta=after - before)
 
- 
-        with run_logger.stage("write_final_output", feature_count=len(all_features)):
-            export_features_to_shapefile(
-                features=all_features,
-                out_shp=final_merged_shp,
-                projection_wkt=projection_wkt,
-            )
-        run_logger.info("final merged output", out_shp=final_merged_shp, count=len(all_features))
+        if len(all_features) != 0:
+            with run_logger.stage("write_final_output", feature_count=len(all_features)):
+                export_features_to_shapefile(
+                    features=all_features,
+                    out_shp=final_merged_shp,
+                    projection_wkt=projection_wkt,
+                )
+            run_logger.info("final merged output", out_shp=final_merged_shp, count=len(all_features))
 
         with run_logger.stage("export_bbox_prompts", shp=final_merged_shp):
             prompt_info = maybe_export_bbox_prompts(cfg=cfg, shp_path=final_merged_shp)

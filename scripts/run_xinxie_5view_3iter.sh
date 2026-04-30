@@ -8,7 +8,7 @@ CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/XinXie/oblique_views.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data/dataset/PV/ZS_PV/003-XinXie}"
 DATA_ROOT="${DATA_ROOT:-/data/dataset/PV/003-XinXie/}"
 IMAGE_GLOB="${IMAGE_GLOB:-images/*.JPG}"
-ROUNDS="${ROUNDS:-3}"
+ROUNDS="${ROUNDS:-4}"
 VIEW_NUM="${VIEW_NUM:-5}"
 RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-iter}"
 DISTRIBUTED="${DISTRIBUTED:-1}"
@@ -26,12 +26,11 @@ run_round() {
   local enable_prompt="$3"
   local iter_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${iter_idx}"
   local view_dir="${iter_dir}/views"
-  local infer_dir="${view_dir}/infer"
-  local prompt_dir="${iter_dir}/prompts"
-  local final_shp="${view_dir}/view_${VIEW_NUM}.shp"
-  local collected_shp="${view_dir}/view_${VIEW_NUM}_collected.shp"
-  local selected_shp="${view_dir}/view_${VIEW_NUM}_selected.shp"
-  local multiview_shp="${view_dir}/view_${VIEW_NUM}_multiview.shp"
+  local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting"
+  local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting"
+  local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting.shp"
+  local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_mv_voting.shp"
+  local selected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_selected_mv_voting.shp"
 
   mkdir -p "$infer_dir" "$prompt_dir" "$view_dir"
 
@@ -46,8 +45,7 @@ run_round() {
     "postprocess.per_image_nms.use_geometry_iou=false"
     "postprocess.view_selection.enabled=true"
     "postprocess.view_selection.view_num=${VIEW_NUM}"
-    "postprocess.view_selection.iou_threshold=0.2"
-    "postprocess.view_selection.use_geometry_iou=false"
+    "postprocess.view_selection.distance_threshold=0.5"
     "postprocess.view_selection.random_seed=42"
     "postprocess.multiview.enabled=true"
     "postprocess.multiview.strategy=nms_keep_max"
@@ -64,7 +62,6 @@ run_round() {
     "output.trace_exports.enabled=true"
     "output.trace_exports.collected_shp=${collected_shp}"
     "output.trace_exports.selected_shp=${selected_shp}"
-    "output.trace_exports.multiview_shp=${multiview_shp}"
   )
 
   if [[ "$enable_prompt" == "1" ]]; then
@@ -103,12 +100,12 @@ run_round() {
   fi
 }
 
-for ((i=0; i<ROUNDS; i++)); do
+for ((i=1; i<ROUNDS; i++)); do
   if [[ "$i" -eq 0 ]]; then
     run_round "$i" "" "0"
   else
     prev_idx=$((i - 1))
-    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/prompts"
+    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/views/view_${VIEW_NUM}/prompts_mv_voting"
     run_round "$i" "$prev_prompt_dir" "1"
   fi
 done
