@@ -18,7 +18,7 @@ A refactored, production-ready pipeline for detecting and segmenting **photovolt
 
 ## 🏗️ Architecture
 
-```
+``` txt
 Input Images (DOM / Oblique)
          │
          ▼
@@ -72,7 +72,7 @@ Each output feature carries three confidence scores:
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/WeeeNHao/MultiView-PV.git
 cd MultiView-PV
 
 # Install dependencies (conda recommended)
@@ -133,10 +133,12 @@ Configs follow a three-level inheritance: `_base.yaml` → template → station 
 ### Projection Modes
 
 **DOM mode** (`projection.mode=dom`):
+
 - Input: DOM image with embedded geotransform
 - Projection: direct raster georeference
 
 **Oblique mode** (`projection.mode=oblique`):
+
 - Input: Oblique imagery + POS CSV + DSM (GeoTIFF)
 - Projection: collinearity equations → affine transform fitting per feature
 - Fallback: direct collinearity if affine is under-constrained
@@ -191,6 +193,7 @@ Repeat, replacing `data.dom_shp` with the latest fused result each round.
 ```
 
 The script executes:
+
 1. DOM baseline
 2. Oblique baseline
 3. N rounds of oblique fusion, each using the previous round's output as `data.dom_shp`
@@ -212,6 +215,7 @@ The script executes:
 ```
 
 When `--enable-legacy-view-loop 1` is set, each round additionally runs:
+
 1. `postprocess/select_views.py` — view selection on previous fused result
 2. `mapping/generate_bbox_prompt.py` — generate per-image prompt bounding boxes
 3. Oblique inference with `inference.prompt.enabled=true` and strict prompt windows
