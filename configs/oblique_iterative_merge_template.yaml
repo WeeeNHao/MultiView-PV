@@ -1,6 +1,10 @@
 _base_:
   - ./oblique_mode_template.yaml
 
+pipeline:
+  projection_workers: 2
+  queue_maxsize: 4
+
 # Use previous-round DOM or fused result as external merge source
 
 data:

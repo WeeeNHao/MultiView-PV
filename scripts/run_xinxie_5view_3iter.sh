@@ -100,7 +100,7 @@ run_round() {
   fi
 }
 
-for ((i=1; i<ROUNDS; i++)); do
+for ((i=3; i<ROUNDS; i++)); do
   if [[ "$i" -eq 0 ]]; then
     run_round "$i" "" "0"
   else

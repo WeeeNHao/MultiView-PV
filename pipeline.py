@@ -3,8 +3,9 @@ from __future__ import annotations
 import glob
 import os
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 
@@ -178,6 +179,8 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
     
             projection_workers = int(pipeline_cfg.get("projection_workers", 2))
             projection_workers = max(1, projection_workers)
+            queue_maxsize = int(pipeline_cfg.get("queue_maxsize", projection_workers * 2))
+            queue_maxsize = max(1, queue_maxsize)
 
             pbar = tqdm(
                 rank_images,
@@ -186,8 +189,51 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
             )
             run_logger.set_tqdm(pbar)
 
-            pending: Optional[tuple[str, int, Future[int]]] = None
+            task_queue: Queue[Optional[tuple[str, int, FeatureList, Any, str, str]]] = Queue(maxsize=queue_maxsize)
+            result_queue: Queue[tuple[str, int, int]] = Queue()
+            error_queue: Queue[Exception] = Queue()
+            projection_error: Optional[Exception] = None
+
+            def projection_worker() -> None:
+                while True:
+                    item = task_queue.get()
+                    if item is None:
+                        task_queue.task_done()
+                        break
+                    image_name, num_before, features_px, geo_meta, image_path, per_image_shp = item
+                    try:
+                        num_after = _project_and_export_image(
+                            features_px,
+                            projection_cfg,
+                            geo_meta,
+                            image_path,
+                            per_image_shp,
+                        )
+                        result_queue.put((image_name, num_before, num_after))
+                    except Exception as exc:
+                        error_queue.put(exc)
+                    finally:
+                        task_queue.task_done()
+
+            def drain_results() -> None:
+                while True:
+                    try:
+                        image_name, num_before, num_after = result_queue.get_nowait()
+                    except Empty:
+                        break
+                    run_logger.update_postfix(
+                        img=image_name.split("_", 1)[-1],
+                        n=num_after,
+                        d=num_after - num_before,
+                    )
+
+            def check_errors() -> None:
+                nonlocal projection_error
+                if projection_error is None and not error_queue.empty():
+                    projection_error = error_queue.get()
+
             with ThreadPoolExecutor(max_workers=projection_workers, thread_name_prefix="proj") as pool:
+                futures = [pool.submit(projection_worker) for _ in range(projection_workers)]
                 for image_path in pbar:
                     image_name = _safe_image_name(image_path)
 
@@ -198,37 +244,24 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
                         )
                     num_features_before = len(features_px)
 
-                    if pending is not None:
-                        prev_image_name, prev_before, prev_future = pending
-                        with run_logger.stage("wait_project_and_write", image=prev_image_name):
-                            prev_after = prev_future.result()
-                        run_logger.update_postfix(
-                            img=prev_image_name.split("_", 1)[-1],
-                            n=prev_after,
-                            d=prev_after - prev_before,
-                        )
-
                     rank_suffix = f"__r{info.rank}" if info.world_size > 1 else ""
                     per_image_shp = os.path.join(per_image_dir, f"{image_name}{rank_suffix}.shp")
-                    future = pool.submit(
-                        _project_and_export_image,
-                        features_px,
-                        projection_cfg,
-                        geo_meta,
-                        image_path,
-                        per_image_shp,
-                    )
-                    pending = (image_name, num_features_before, future)
+                    task_queue.put((image_name, num_features_before, features_px, geo_meta, image_path, per_image_shp))
+                    drain_results()
+                    check_errors()
+                    if projection_error is not None:
+                        break
 
-                if pending is not None:
-                    prev_image_name, prev_before, prev_future = pending
-                    with run_logger.stage("wait_project_and_write", image=prev_image_name):
-                        prev_after = prev_future.result()
-                    run_logger.update_postfix(
-                        img=prev_image_name.split("_", 1)[-1],
-                        n=prev_after,
-                        d=prev_after - prev_before,
-                    )
+                for _ in range(projection_workers):
+                    task_queue.put(None)
+                task_queue.join()
+                drain_results()
+                check_errors()
+
+                for future in futures:
+                    future.result()
+                if projection_error is not None:
+                    raise projection_error
 
             run_logger.clear_tqdm()
             run_logger.info(

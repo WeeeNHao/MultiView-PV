@@ -3,6 +3,8 @@ _base_:
 
 pipeline:
   run_inference: false
+  projection_workers: 2
+  queue_maxsize: 8
 
 
 data:

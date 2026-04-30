@@ -6,6 +6,10 @@ pipeline:
   # If false, skip model inference/projection and directly consume existing
   # per-image shapefiles from output.per_image_shp_dir for postprocess stages.
   run_inference: true
+  # CPU projection/export workers.
+  projection_workers: 2
+  # Max items buffered between inference and projection workers.
+  queue_maxsize: 4
 
 model:
   name: sam3

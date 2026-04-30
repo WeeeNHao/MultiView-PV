@@ -1,6 +1,10 @@
 _base_:
   - ./base_refactor.yaml
 
+pipeline:
+  projection_workers: 2
+  queue_maxsize: 4
+
 projection:
   mode: oblique
   oblique:
