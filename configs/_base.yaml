@@ -3,12 +3,15 @@ distributed:
   backend: nccl
 
 pipeline:
-  # If false, skip model inference/projection and directly consume existing
-  # per-image shapefiles from output.per_image_shp_dir for postprocess stages.
+  # If false, skip model inference and reuse cached per-image results.
   run_inference: true
-  # CPU projection/export workers.
+  # If false, skip projection stage and assume per-image projected shp exists.
+  run_projection: true
+  # If false, skip postprocess/merge stages.
+  run_postprocess: true
+  # Projection/export workers (reserved; projection runs sequentially).
   projection_workers: 4
-  # Max items buffered between inference and projection workers.
+  # Deprecated: kept for backward compatibility.
   queue_maxsize: 8
 
 model:
@@ -39,7 +42,7 @@ inference:
   prompt:
     enabled: false
     source: ""
-    max_prompt_per_window: 5
+    max_prompt_per_window: 3
     # If true, only windows with valid prompt boxes are inferred.
     strict_window_prompt: false
   early_filter:
@@ -122,5 +125,7 @@ postprocess:
     dom_src_field: src
 
 output:
+  # Raw (pixel) shapefiles for oblique inference results.
+  per_image_raw_shp_dir: outputs/refactor_v2/per_image_raw
   per_image_shp_dir: outputs/refactor_v2/per_image
   final_merged_shp: outputs/refactor_v2/final/final_merged.shp

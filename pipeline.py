@@ -3,15 +3,13 @@ from __future__ import annotations
 import glob
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 
 from osgeo import osr
 
-from utils.common import DistInfo, FeatureList
+from utils.common import DistInfo, FeatureList, GeoMeta
 from utils.config import RuntimeConfig
 from inference.distributed import (
     barrier_if_needed,
@@ -93,12 +91,29 @@ def _safe_image_name(image_path: str) -> str:
     return f"{parent}_{path.stem}"
 
 
+def _strip_rank_suffix(stem: str) -> str:
+    if "__r" not in stem:
+        return stem
+    head, suffix = stem.rsplit("__r", 1)
+    return head if suffix.isdigit() else stem
+
+
+def _is_oblique_image(geo_meta: GeoMeta, projection_cfg: Dict[str, Any]) -> bool:
+    mode = str(projection_cfg.get("mode", "auto")).lower()
+    if mode == "dom":
+        return False
+    if mode == "oblique":
+        return True
+    return geo_meta.geotransform is None
+
+
 def _project_and_export_image(
     features_px: FeatureList,
     projection_cfg: Dict[str, Any],
     geo_meta: Any,
     image_path: str,
     per_image_shp: str,
+    progress_position: int = 1,
 ) -> int:
     projection_wkt = _resolve_projection_wkt(geo_meta, projection_cfg)
     features_map = project_and_score_features(
@@ -106,7 +121,7 @@ def _project_and_export_image(
         geo_meta=geo_meta,
         projection_cfg=projection_cfg,
         image_path=image_path,
-        progress_position=3,
+        progress_position=progress_position,
     )
     export_features_to_shapefile(
         features=features_map,
@@ -137,8 +152,13 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
     post_cfg = _as_dict(cfg, "postprocess")
     pipeline_cfg = _as_dict(cfg, "pipeline")
     run_inference = bool(pipeline_cfg.get("run_inference", True))
+    run_projection = bool(pipeline_cfg.get("run_projection", True))
+    run_postprocess = bool(pipeline_cfg.get("run_postprocess", True))
 
     per_image_dir = str(output_cfg.get("per_image_shp_dir", "outputs/per_image"))
+    per_image_raw_dir = str(output_cfg.get("per_image_raw_shp_dir", "")).strip()
+    if not per_image_raw_dir:
+        per_image_raw_dir = os.path.join(os.path.dirname(per_image_dir) or ".", "per_image_raw")
     final_merged_shp = str(output_cfg.get("final_merged_shp", "outputs/final_merged.shp"))
     trace_cfg = _as_dict(output_cfg, "trace_exports")
     trace_enabled = bool(trace_cfg.get("enabled", True))
@@ -163,18 +183,28 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
     logging_enabled = bool(logging_cfg.get("enabled", True))
 
     _ensure_dir(per_image_dir)
+    if run_inference or run_projection:
+        _ensure_dir(per_image_raw_dir)
     _ensure_dir(os.path.dirname(final_merged_shp) or ".")
     _ensure_dir(logs_dir)
     if trace_enabled:
         _ensure_dir(os.path.dirname(trace_collected_shp) or ".")
         _ensure_dir(os.path.dirname(trace_selected_shp) or ".")
 
-    if run_inference:
+    if run_inference or run_projection:
         image_paths = resolve_image_paths(data_cfg)
-        rank_images = split_items_for_rank(image_paths, info)
     else:
         image_paths = []
+
+    if run_inference:
+        rank_images = split_items_for_rank(image_paths, info)
+    else:
         rank_images = []
+
+    image_lookup: Dict[str, str] = {}
+    if run_projection:
+        for path in image_paths:
+            image_lookup[_safe_image_name(path)] = path
 
     run_logger = PipelineRunLogger(
         log_dir=logs_dir,
@@ -189,12 +219,16 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
         assigned_images=len(rank_images),
         world_size=info.world_size,
         run_inference=run_inference,
+        run_projection=run_projection,
+        run_postprocess=run_postprocess,
     )
     run_logger.event(
         "pipeline_start",
         total_images=len(image_paths),
         assigned_images=len(rank_images),
         run_inference=run_inference,
+        run_projection=run_projection,
+        run_postprocess=run_postprocess,
     )
 
     model = None
@@ -207,12 +241,7 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
             with run_logger.stage("build_model"):
                 model = build_model(model_cfg)
                 runner = InferenceRunner(model=model, inference_cfg=inference_cfg)
-    
-            projection_workers = int(pipeline_cfg.get("projection_workers", 2))
-            projection_workers = max(1, projection_workers)
-            queue_maxsize = int(pipeline_cfg.get("queue_maxsize", projection_workers * 2))
-            queue_maxsize = max(1, queue_maxsize)
-
+        
             pbar = tqdm(
                 rank_images,
                 desc=f"Dataloader [rank={info.rank}]",
@@ -220,79 +249,47 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
             )
             run_logger.set_tqdm(pbar)
 
-            task_queue: Queue[Optional[tuple[str, int, FeatureList, Any, str, str]]] = Queue(maxsize=queue_maxsize)
-            result_queue: Queue[tuple[str, int, int]] = Queue()
-            error_queue: Queue[Exception] = Queue()
-            projection_error: Optional[Exception] = None
+            for image_path in pbar:
+                image_name = _safe_image_name(image_path)
 
-            def projection_worker() -> None:
-                while True:
-                    item = task_queue.get()
-                    if item is None:
-                        task_queue.task_done()
-                        break
-                    image_name, num_before, features_px, geo_meta, image_path, per_image_shp = item
-                    try:
-                        num_after = _project_and_export_image(
-                            features_px,
-                            projection_cfg,
-                            geo_meta,
-                            image_path,
-                            per_image_shp,
+                with run_logger.stage("infer_image", image=image_name):
+                    features_px, geo_meta = runner.run_image(
+                        image_path=image_path,
+                        progress_position=1,
+                    )
+                num_features_before = len(features_px)
+
+                rank_suffix = f"__r{info.rank}" if info.world_size > 1 else ""
+                if _is_oblique_image(geo_meta, projection_cfg):
+                    per_image_shp = os.path.join(per_image_raw_dir, f"{image_name}{rank_suffix}.shp")
+                    with run_logger.stage("write_raw_shp", image=image_name):
+                        export_features_to_shapefile(
+                            features=features_px,
+                            out_shp=per_image_shp,
+                            projection_wkt=None,
                         )
-                        result_queue.put((image_name, num_before, num_after))
-                    except Exception as exc:
-                        error_queue.put(exc)
-                    finally:
-                        task_queue.task_done()
-
-            def drain_results() -> None:
-                while True:
-                    try:
-                        image_name, num_before, num_after = result_queue.get_nowait()
-                    except Empty:
-                        break
+                    run_logger.update_postfix(
+                        img=image_name.split("_", 1)[-1],
+                        n=num_features_before,
+                        mode="raw",
+                    )
+                else:
+                    per_image_shp = os.path.join(per_image_dir, f"{image_name}{rank_suffix}.shp")
+                    with run_logger.stage("project_and_write", image=image_name):
+                        num_after = _project_and_export_image(
+                            features_px=features_px,
+                            projection_cfg=projection_cfg,
+                            geo_meta=geo_meta,
+                            image_path=image_path,
+                            per_image_shp=per_image_shp,
+                            progress_position=1,
+                        )
                     run_logger.update_postfix(
                         img=image_name.split("_", 1)[-1],
                         n=num_after,
-                        d=num_after - num_before,
+                        d=num_after - num_features_before,
+                        mode="proj",
                     )
-
-            def check_errors() -> None:
-                nonlocal projection_error
-                if projection_error is None and not error_queue.empty():
-                    projection_error = error_queue.get()
-
-            with ThreadPoolExecutor(max_workers=projection_workers, thread_name_prefix="proj") as pool:
-                futures = [pool.submit(projection_worker) for _ in range(projection_workers)]
-                for image_path in pbar:
-                    image_name = _safe_image_name(image_path)
-
-                    with run_logger.stage("infer_image", image=image_name):
-                        features_px, geo_meta = runner.run_image(
-                            image_path=image_path,
-                            progress_position=1,
-                        )
-                    num_features_before = len(features_px)
-
-                    rank_suffix = f"__r{info.rank}" if info.world_size > 1 else ""
-                    per_image_shp = os.path.join(per_image_dir, f"{image_name}{rank_suffix}.shp")
-                    task_queue.put((image_name, num_features_before, features_px, geo_meta, image_path, per_image_shp))
-                    drain_results()
-                    check_errors()
-                    if projection_error is not None:
-                        break
-
-                for _ in range(projection_workers):
-                    task_queue.put(None)
-                task_queue.join()
-                drain_results()
-                check_errors()
-
-                for future in futures:
-                    future.result()
-                if projection_error is not None:
-                    raise projection_error
 
             run_logger.clear_tqdm()
             run_logger.info(
@@ -300,7 +297,8 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
                 images=len(rank_images),
                 stage_stats={
                     "infer_image": run_logger.stage_stats.get("infer_image", {}),
-                    "wait_project_and_write": run_logger.stage_stats.get("wait_project_and_write", {}),
+                    "write_raw_shp": run_logger.stage_stats.get("write_raw_shp", {}),
+                    "project_and_write": run_logger.stage_stats.get("project_and_write", {}),
                 },
             )
 
@@ -313,20 +311,87 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
                 import torch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    
 
         else:
-            run_logger.info("skip inference and projection", per_image_dir=per_image_dir)
-            if not _collect_rank_outputs(per_image_dir):
-                raise FileNotFoundError(
-                    f"No per-image shapefiles found under: {per_image_dir}. "
-                    "Set pipeline.run_inference=true or prepare per-image shp files first."
+            run_logger.info(
+                "skip inference",
+                per_image_dir=per_image_dir,
+                per_image_raw_dir=per_image_raw_dir,
+            )
+
+        if run_projection:
+            mode = str(projection_cfg.get("mode", "auto")).lower()
+            raw_shp_files = _collect_rank_outputs(per_image_raw_dir)
+            if not raw_shp_files:
+                if mode == "oblique":
+                    raise FileNotFoundError(
+                        f"No raw per-image shapefiles found under: {per_image_raw_dir}. "
+                        "Run inference first or set output.per_image_raw_shp_dir."
+                    )
+                run_logger.info("skip projection", per_image_raw_dir=per_image_raw_dir)
+            else:
+                rank_raw_shps = split_items_for_rank(raw_shp_files, info)
+                pbar = tqdm(
+                    rank_raw_shps,
+                    desc=f"Projecting raw [rank={info.rank}]",
+                    position=0,
                 )
+                run_logger.set_tqdm(pbar)
+                dummy_meta = GeoMeta(geotransform=None, projection_wkt=None, width=0, height=0)
+
+                for raw_shp in pbar:
+                    stem = _strip_rank_suffix(Path(raw_shp).stem)
+                    image_path = image_lookup.get(stem)
+                    if not image_path:
+                        run_logger.info("missing image path for raw shp", shp=raw_shp, image=stem)
+                        continue
+
+                    with run_logger.stage("project_raw_shp", image=stem):
+                        features_px = read_features_from_shapefile(shp_path=raw_shp)
+                        for feat in features_px:
+                            feat["geom"] = None
+                        per_image_shp = os.path.join(per_image_dir, Path(raw_shp).name)
+                        num_after = _project_and_export_image(
+                            features_px=features_px,
+                            projection_cfg=projection_cfg,
+                            geo_meta=dummy_meta,
+                            image_path=image_path,
+                            per_image_shp=per_image_shp,
+                            progress_position=1,
+                        )
+                    run_logger.update_postfix(
+                        img=stem.split("_", 1)[-1],
+                        n=num_after,
+                    )
+
+                run_logger.clear_tqdm()
+                run_logger.info(
+                    "projection complete",
+                    images=len(rank_raw_shps),
+                    per_image_dir=per_image_dir,
+                )
+
+        else:
+            run_logger.info(
+                "skip projection",
+                per_image_dir=per_image_dir,
+                per_image_raw_dir=per_image_raw_dir,
+            )
+
+        if run_postprocess and not _collect_rank_outputs(per_image_dir):
+            raise FileNotFoundError(
+                f"No per-image shapefiles found under: {per_image_dir}. "
+                "Run projection first or set pipeline.run_postprocess=false."
+            )
 
 
         with run_logger.stage("barrier"):
             barrier_if_needed()
         if not is_main_process(info):
+            return
+
+        if not run_postprocess:
+            run_logger.info("skip postprocess", per_image_dir=per_image_dir)
             return
 
         projection_wkt = _read_first_projection_wkt(per_image_dir)

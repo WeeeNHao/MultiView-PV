@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 from utils.common import GeoMeta
 
+import time
 
 gdal.UseExceptions()
 
@@ -180,8 +181,8 @@ class SlidingWindowDataset(Dataset):
             image_height=image_height,
             slice_height=int(slicing_cfg.get("slice_height", 1024)),
             slice_width=int(slicing_cfg.get("slice_width", 1024)),
-            overlap_height_ratio=float(slicing_cfg.get("overlap_height_ratio", 0.25)),
-            overlap_width_ratio=float(slicing_cfg.get("overlap_width_ratio", 0.25)),
+            overlap_height_ratio=float(slicing_cfg.get("overlap_height_ratio", 0.5)),
+            overlap_width_ratio=float(slicing_cfg.get("overlap_width_ratio", 0.5)),
         )
 
         prompt_source = str(self.prompt_cfg.get("source", ""))

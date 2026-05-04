@@ -150,6 +150,8 @@ class InferenceRunner:
         image_path: str,
         progress_position: int = 1,
     ) -> Tuple[FeatureList, GeoMeta]:
+        import time
+        start_time = time.time()
         dataset = SlidingWindowDataset(
             image_path=image_path,
             slicing_cfg=self.slicing_cfg,
@@ -161,13 +163,14 @@ class InferenceRunner:
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            # prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-            # persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
             collate_fn=window_collate,
         )
 
         all_features: FeatureList = []
-
+        end_time = time.time()
+        print(f"Prepared dataset and dataloader in {end_time - start_time:.2f}s, total windows: {len(dataset.windows)}")
         for batch in tqdm(
             dataloader,
             desc="Inferring sliding windows",
@@ -179,7 +182,7 @@ class InferenceRunner:
             prompts = batch["geometry_prompts"]
             labels = batch["geometry_labels"]
             srcs = batch["srcs"]
-
+            time_batch = time.time()
             if self.prompt_enabled and self.strict_window_prompt:
                 keep_indices = [i for i, prompt in enumerate(prompts) if prompt]
                 if not keep_indices:
@@ -196,7 +199,7 @@ class InferenceRunner:
                 geometry_prompts=prompts,
                 geometry_labels=labels,
             )
-
+            print(f"Inferred batch of {len(images)} windows in {time.time() - time_batch:.2f}s")
             total = min(len(offsets), len(srcs))
             for i in range(total):
                 pred = results[i] if i < len(results) else {}
