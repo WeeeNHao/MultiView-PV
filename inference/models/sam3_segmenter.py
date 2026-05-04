@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 import torch
 from PIL import Image
@@ -126,18 +126,63 @@ class SAM3Segmenter:
         self,
         image: Image.Image | List[Image.Image],
         text_prompt: str = "a PV Panel",
-        geometry_prompt: List[List[float]] | None = None,
-        geometry_labels: List[bool] | None = None,
+        geometry_prompt: List[List[float]] | List[Optional[List[List[float]]]] | None = None,
+        geometry_labels: List[bool] | List[Optional[List[bool]]] | None = None,
     ) -> List[Dict]:
         if not isinstance(image, list):
             image = [image]
 
+        def _looks_like_boxes(value: Any) -> bool:
+            if not isinstance(value, list) or not value:
+                return False
+            first = value[0]
+            if not isinstance(first, (list, tuple)) or len(first) != 4:
+                return False
+            return all(isinstance(v, (int, float)) for v in first)
+
+        prompts_per_image: List[Optional[List[List[float]]]]
+        labels_per_image: List[Optional[List[bool]]]
+
+        if geometry_prompt is None:
+            prompts_per_image = [None] * len(image)
+        elif len(image) > 1 and _looks_like_boxes(geometry_prompt):
+            prompts_per_image = [geometry_prompt] * len(image)
+        elif len(image) > 1 and isinstance(geometry_prompt, list) and len(geometry_prompt) == len(image):
+            prompts_per_image = list(geometry_prompt)
+        else:
+            prompts_per_image = [geometry_prompt] * len(image)
+
+        if geometry_labels is None:
+            labels_per_image = [None] * len(image)
+        elif len(image) > 1 and isinstance(geometry_labels, list) and len(geometry_labels) == len(image):
+            labels_per_image = list(geometry_labels)
+        else:
+            labels_per_image = [geometry_labels] * len(image)
+
         datapoints = []
-        for img in image:
+        for idx, img in enumerate(image):
             dp = _create_empty_datapoint()
             _set_image(dp, img)
-            if geometry_prompt is not None and geometry_labels is not None:
-                _add_visual_prompt(dp, geometry_prompt, geometry_labels, text_prompt=text_prompt)
+            prompts = prompts_per_image[idx]
+            labels = labels_per_image[idx]
+            if prompts is not None:
+                if (
+                    isinstance(prompts, list)
+                    and len(prompts) == 1
+                    and isinstance(prompts[0], list)
+                    and prompts[0]
+                    and isinstance(prompts[0][0], (list, tuple))
+                ):
+                    prompts = prompts[0]
+                if labels is None:
+                    labels = [True] * len(prompts)
+                if (
+                    isinstance(labels, list)
+                    and len(labels) == 1
+                    and isinstance(labels[0], list)
+                ):
+                    labels = labels[0]
+                _add_visual_prompt(dp, prompts, labels, text_prompt=text_prompt)
             else:
                 _add_text_prompt(dp, text_prompt)
             dp = self.transform(dp)

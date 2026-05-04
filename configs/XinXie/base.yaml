@@ -3,10 +3,16 @@ _base_:
 
 projection:
   oblique:
-    avg_alt: 37.5
+    # avg_alt: 37.5
+    ray_dsm_max_iter: 8
+    ray_dsm_tol: 0.01
+    ray_dsm_init_window: 9
+    ray_dsm_fallback_avg_alt: false
+    enable_alt_filter: false
     pose_csv: "/data/dataset/PV/003-XinXie/CAM/pose.csv"
     dsm_path: "/data/dataset/PV/003-XinXie/dsm/DSM.tif"
     preload_dsm: true
+    epsg: 4550
 
   score:
     mode: standard

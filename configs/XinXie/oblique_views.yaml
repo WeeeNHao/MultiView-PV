@@ -3,8 +3,8 @@ _base_:
 
 pipeline:
   run_inference: false
-  projection_workers: 2
-  queue_maxsize: 8
+  projection_workers: 8
+  queue_maxsize: 32
 
 
 data:
@@ -20,13 +20,13 @@ postprocess:
     use_geometry_iou: false
 
   view_selection: 
-    enabled: true
+    enabled: false
     view_num: 5
     distance_threshold: 0.5
     random_seed: 42
 
   multiview:
-    enabled: true
+    enabled: false
     strategy: nms_keep_max
     score_field: con_weight
     iou_threshold: 0.2
@@ -34,7 +34,7 @@ postprocess:
   prompt_export:
     enabled: true
     mode: oblique
-    output_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/prompts_mv_voting/
+    output_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/prompts_mv_voting_ray_dsm/
     min_size: 50
     include_intersections: true
     use_spatial_index: true
@@ -43,10 +43,10 @@ postprocess:
     enabled: false
 
 output:
-  per_image_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/infer/
-  final_merged_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/view_5_mv_voting.shp
+  per_image_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/infer_mv_voting_ray_dsm/
+  final_merged_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_mv_voting_ray_dsm.shp
   trace_exports:
-    enabled: true
-    collected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/view_5_collected.shp
-    selected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/view_5_selected_mv_voting.shp
+    enabled: false
+    collected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_collected_ray_dsm.shp
+    selected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_selected_mv_voting_ray_dsm.shp
   

@@ -8,7 +8,7 @@ CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/configs/XinXie/oblique_views.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data/dataset/PV/ZS_PV/003-XinXie}"
 DATA_ROOT="${DATA_ROOT:-/data/dataset/PV/003-XinXie/}"
 IMAGE_GLOB="${IMAGE_GLOB:-images/*.JPG}"
-ROUNDS="${ROUNDS:-4}"
+ROUNDS="${ROUNDS:-5}"
 VIEW_NUM="${VIEW_NUM:-5}"
 RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-iter}"
 DISTRIBUTED="${DISTRIBUTED:-1}"
@@ -26,11 +26,11 @@ run_round() {
   local enable_prompt="$3"
   local iter_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${iter_idx}"
   local view_dir="${iter_dir}/views"
-  local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting"
-  local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting"
-  local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting.shp"
-  local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_mv_voting.shp"
-  local selected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_selected_mv_voting.shp"
+  local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting_ray_dsm"
+  local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting_ray_dsm"
+  local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting_ray_dsm.shp"
+  local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_ray_dsm.shp"
+  local selected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_selected_mv_voting_ray_dsm.shp"
 
   mkdir -p "$infer_dir" "$prompt_dir" "$view_dir"
 
@@ -100,7 +100,7 @@ run_round() {
   fi
 }
 
-for ((i=3; i<ROUNDS; i++)); do
+for ((i=4; i<ROUNDS; i++)); do
   if [[ "$i" -eq 0 ]]; then
     run_round "$i" "" "0"
   else

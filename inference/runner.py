@@ -136,6 +136,8 @@ class InferenceRunner:
         self.batch_size = int(dataloader_cfg.get("batch_size", 4))
         self.num_workers = int(dataloader_cfg.get("num_workers", 0))
         self.pin_memory = bool(dataloader_cfg.get("pin_memory", False))
+        self.prefetch_factor = int(dataloader_cfg.get("prefetch_factor", 2))
+        self.persistent_workers = bool(dataloader_cfg.get("persistent_workers", False))
 
         self.prompt_cfg = inference_cfg.get("prompt", {})
         self.slicing_cfg = inference_cfg.get("slicing", {})
@@ -159,6 +161,8 @@ class InferenceRunner:
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            # prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            # persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
             collate_fn=window_collate,
         )
 

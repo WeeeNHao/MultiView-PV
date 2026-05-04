@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, List, Optional, Sequence, Tuple
 
 from osgeo import ogr
@@ -94,7 +95,7 @@ def export_features_to_shapefile(
     for name, ftype in fields:
         layer.CreateField(ogr.FieldDefn(name, ftype))
 
-    for idx, feature in enumerate(tqdm(features, desc="Writing shapefile", leave=False)):
+    for idx, feature in enumerate(tqdm(features, desc="Writing shapefile", leave=False, position=2)):
         geom = _segmentation_to_polygon(feature.get("segmentation"))
         if geom is None:
             geom = _bbox_to_polygon(feature.get("bbox", []))

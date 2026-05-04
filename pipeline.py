@@ -9,6 +9,8 @@ from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 
+from osgeo import osr
+
 from utils.common import DistInfo, FeatureList
 from utils.config import RuntimeConfig
 from inference.distributed import (
@@ -57,6 +59,34 @@ def _read_first_projection_wkt(per_image_dir: str) -> Optional[str]:
         return f.read()
 
 
+def _epsg_to_wkt(epsg: int) -> Optional[str]:
+    srs = osr.SpatialReference()
+    if srs.ImportFromEPSG(int(epsg)) != 0:
+        return None
+    return srs.ExportToWkt()
+
+
+def _resolve_projection_wkt(geo_meta: Any, projection_cfg: Dict[str, Any]) -> Optional[str]:
+    projection_wkt = getattr(geo_meta, "projection_wkt", None)
+    if projection_wkt:
+        return projection_wkt
+
+    oblique_cfg = projection_cfg.get("oblique", {}) if isinstance(projection_cfg, dict) else {}
+    if isinstance(oblique_cfg, dict):
+        wkt = str(oblique_cfg.get("projection_wkt", "")).strip()
+        if wkt:
+            return wkt
+        epsg_value = oblique_cfg.get("epsg", oblique_cfg.get("projection_epsg", 4550))
+    else:
+        epsg_value = 4550
+
+    try:
+        epsg_int = int(epsg_value)
+    except (TypeError, ValueError):
+        return None
+    return _epsg_to_wkt(epsg_int)
+
+
 def _safe_image_name(image_path: str) -> str:
     path = Path(image_path)
     parent = path.parent.name or "root"
@@ -70,17 +100,18 @@ def _project_and_export_image(
     image_path: str,
     per_image_shp: str,
 ) -> int:
+    projection_wkt = _resolve_projection_wkt(geo_meta, projection_cfg)
     features_map = project_and_score_features(
         features=features_px,
         geo_meta=geo_meta,
         projection_cfg=projection_cfg,
         image_path=image_path,
-        progress_position=2,
+        progress_position=3,
     )
     export_features_to_shapefile(
         features=features_map,
         out_shp=per_image_shp,
-        projection_wkt=geo_meta.projection_wkt,
+        projection_wkt=projection_wkt,
     )
     return len(features_map)
 

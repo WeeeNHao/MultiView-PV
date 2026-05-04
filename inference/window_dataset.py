@@ -118,6 +118,9 @@ def _load_prompt_boxes(image_path: str, prompt_source: str) -> List[List[float]]
                 box = [float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])]
             except ValueError:
                 continue
+            area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+            if area < 500.0:
+                continue
             boxes.append(box)
     return boxes
 
@@ -165,6 +168,8 @@ class SlidingWindowDataset(Dataset):
         self._use_gdal = False
         self._projection_wkt: Optional[str] = None
         self._geotransform: Optional[List[float]] = None
+        self._gdal_ds: Optional[gdal.Dataset] = None
+        self._pil_img: Optional[Image.Image] = None
 
         image_width, image_height = self._probe_shape_and_geo()
         self.image_width = image_width
@@ -217,20 +222,29 @@ class SlidingWindowDataset(Dataset):
 
     def _read_window(self, win: WindowRecord) -> Image.Image:
         if self._use_gdal:
-            ds = gdal.Open(self.image_path)
-            if ds is None:
+            if self._gdal_ds is None:
+                self._gdal_ds = gdal.Open(self.image_path)
+            if self._gdal_ds is None:
                 raise RuntimeError(f"Cannot open image with GDAL: {self.image_path}")
-            arr = ds.ReadAsArray(win.x, win.y, win.w, win.h)
-            ds = None
+            arr = self._gdal_ds.ReadAsArray(win.x, win.y, win.w, win.h)
             if arr is None:
                 raise RuntimeError(
                     f"Failed to read window x={win.x}, y={win.y}, w={win.w}, h={win.h}"
                 )
             return _array_to_rgb_pil(arr)
 
-        with Image.open(self.image_path) as img:
-            rgb = img.convert("RGB")
-            return rgb.crop((win.x, win.y, win.x + win.w, win.y + win.h))
+        if self._pil_img is None:
+            self._pil_img = Image.open(self.image_path).convert("RGB")
+        return self._pil_img.crop((win.x, win.y, win.x + win.w, win.y + win.h))
+
+    def __del__(self) -> None:
+        self._gdal_ds = None
+        if self._pil_img is not None:
+            try:
+                self._pil_img.close()
+            except Exception:
+                pass
+            self._pil_img = None
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         win = self.windows[idx]

@@ -7,9 +7,9 @@ pipeline:
   # per-image shapefiles from output.per_image_shp_dir for postprocess stages.
   run_inference: true
   # CPU projection/export workers.
-  projection_workers: 2
+  projection_workers: 4
   # Max items buffered between inference and projection workers.
-  queue_maxsize: 4
+  queue_maxsize: 8
 
 model:
   name: sam3
@@ -28,7 +28,7 @@ data:
 inference:
   text_prompt: "a PV Panel"
   dataloader:
-    batch_size: 16
+    batch_size: 32
     num_workers: 2
     pin_memory: true
   slicing:
