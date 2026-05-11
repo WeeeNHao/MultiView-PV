@@ -27,6 +27,7 @@ run_round() {
   local iter_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${iter_idx}"
   local view_dir="${iter_dir}/views"
   local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting_ray_dsm"
+  local proj_dir="${view_dir}/view_${VIEW_NUM}/proj_mv_voting_ray_dsm"
   local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting_ray_dsm"
   local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting_ray_dsm.shp"
   local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_ray_dsm.shp"
@@ -57,7 +58,8 @@ run_round() {
     "postprocess.prompt_export.min_size=50"
     "postprocess.prompt_export.include_intersections=true"
     "postprocess.prompt_export.use_spatial_index=true"
-    "output.per_image_shp_dir=${infer_dir}"
+    "output.per_image_shp_dir=${proj_dir}"
+    "output.per_image_raw_shp_dir=${infer_dir}"
     "output.final_merged_shp=${final_shp}"
     "output.trace_exports.enabled=true"
     "output.trace_exports.collected_shp=${collected_shp}"
@@ -68,7 +70,7 @@ run_round() {
     opts+=(
       "inference.prompt.enabled=true"
       "inference.prompt.source=${prompt_source}"
-      "inference.prompt.strict_window_prompt=true"
+      "inference.prompt.strict_window_prompt=false"
       "inference.prompt.max_prompt_per_window=5"
     )
   else
@@ -100,12 +102,12 @@ run_round() {
   fi
 }
 
-for ((i=4; i<ROUNDS; i++)); do
+for ((i=1; i<ROUNDS; i++)); do
   if [[ "$i" -eq 0 ]]; then
     run_round "$i" "" "0"
   else
     prev_idx=$((i - 1))
-    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/views/view_${VIEW_NUM}/prompts_mv_voting"
+    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/views/view_${VIEW_NUM}/prompts_mv_voting_ray_dsm"
     run_round "$i" "$prev_prompt_dir" "1"
   fi
 done
