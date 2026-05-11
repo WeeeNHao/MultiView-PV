@@ -121,7 +121,6 @@ def export_features_to_shapefile(
         out_feat.SetField("area_sc", float(feature.get("area_score", 0.0)))
         out_feat.SetField("ratio_sc", float(feature.get("ratio_score", 0.0)))
         out_feat.SetField("shape_sc", float(feature.get("shape_score", 0.0)))
-
         layer.CreateFeature(out_feat)
         out_feat = None
 

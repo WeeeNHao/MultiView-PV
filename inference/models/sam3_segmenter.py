@@ -112,7 +112,7 @@ class SAM3Segmenter:
             use_original_sizes_mask=True,
             convert_mask_to_rle=False,
             detection_threshold=detection_threshold,
-            to_cpu=True,
+            to_cpu=False,
         )
         self.transform = ComposeAPI(
             transforms=[

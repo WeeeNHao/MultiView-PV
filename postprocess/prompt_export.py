@@ -289,7 +289,7 @@ def _export_oblique_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict
         if geom is None:
             continue
 
-        if float(feat.GetFieldAsString("con")) < 0.8:
+        if float(feat.GetFieldAsString("con")) < float(prompt_cfg.get("min_confidence", 0.5)):
             continue
         
         src = _normalize_image_name(feat.GetFieldAsString("src")) if feat.GetFieldIndex("src") != -1 else ""

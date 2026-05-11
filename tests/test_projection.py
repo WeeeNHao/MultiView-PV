@@ -6,6 +6,70 @@ from projection.collinearity import (
     photo_to_ground,
     ground_to_photo,
 )
+from projection.oblique_projector import ObliqueProjector
+
+
+def test_oblique_projector_forces_affine_when_requested():
+    projector = ObliqueProjector.__new__(ObliqueProjector)
+    projector.method = "affine"
+    projector.min_control_points = 999
+    projector.enable_slope_correction = False
+    projector._resolve_pose = lambda image_path: [0.0, 0.0, 10.0, 0.0, 0.0, 0.0]
+    projector._build_affine_pairs = lambda bbox, pose: (
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+    )
+
+    feature = {
+        "segmentation": [[0.0, 0.0, 2.0, 0.0, 2.0, 1.0]],
+        "bbox": [0.0, 0.0, 2.0, 1.0],
+    }
+
+    out = projector.project_feature(feature, "dummy.jpg")
+
+    assert out["projection_method"] == "affine"
+    assert out["segmentation"] == feature["segmentation"]
+
+
+def test_oblique_projector_forces_collinearity_when_requested():
+    projector = ObliqueProjector.__new__(ObliqueProjector)
+    projector.method = "collinearity"
+    projector.min_control_points = 999
+    projector.enable_slope_correction = False
+    projector._resolve_pose = lambda image_path: [0.0, 0.0, 10.0, 0.0, 0.0, 0.0]
+
+    def _unexpected_affine_pairs(bbox, pose):
+        raise AssertionError("affine path must not be used when method=collinearity")
+
+    projector._build_affine_pairs = _unexpected_affine_pairs
+    projector._project_points_direct_collinearity = lambda points, pose: [(x + 1.0, y + 2.0) for x, y in points]
+
+    feature = {
+        "segmentation": [[0.0, 0.0, 2.0, 0.0, 2.0, 1.0]],
+        "bbox": [0.0, 0.0, 2.0, 1.0],
+    }
+
+    out = projector.project_feature(feature, "dummy.jpg")
+
+    assert out["projection_method"] == "collinearity"
+    assert out["segmentation"] == [[1.0, 2.0, 3.0, 2.0, 3.0, 3.0]]
+
+
+def test_oblique_projector_rejects_forced_affine_without_enough_control_points():
+    projector = ObliqueProjector.__new__(ObliqueProjector)
+    projector.method = "affine"
+    projector.min_control_points = 999
+    projector.enable_slope_correction = False
+    projector._resolve_pose = lambda image_path: [0.0, 0.0, 10.0, 0.0, 0.0, 0.0]
+    projector._build_affine_pairs = lambda bbox, pose: ([(0.0, 0.0), (1.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)])
+
+    feature = {
+        "segmentation": [[0.0, 0.0, 2.0, 0.0, 2.0, 1.0]],
+        "bbox": [0.0, 0.0, 2.0, 1.0],
+    }
+
+    with pytest.raises(ValueError, match="projection.oblique.method=affine requires at least 3 valid control points"):
+        projector.project_feature(feature, "dummy.jpg")
 
 def test_collinearity_roundtrip():
     # Camera parameters

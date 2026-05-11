@@ -36,9 +36,8 @@ def _get_rect_info(geom: ogr.Geometry, ref: str = "min_rect") -> tuple[float, fl
         if len(distance_edges) != 4:
             return 0.0, 0.0, 0.0
         edge_lengths = [np.linalg.norm(np.array(distance_edges[i]) - np.array(distance_edges[(i + 1) % 4])) for i in range(4)]
-        edge_lengths.sort()
         w = edge_lengths[0]
-        h = edge_lengths[2]
+        h = edge_lengths[1]
         return w, h, min_rect.area
     except Exception:
         return 0.0, 0.0, 0.0

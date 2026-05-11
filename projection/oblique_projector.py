@@ -54,11 +54,14 @@ class ObliqueProjector:
         self.cfg = cfg
         self.pose_csv = str(cfg.get("pose_csv", "")).strip()
         self.dsm_path = str(cfg.get("dsm_path", "")).strip()
+        self.method = str(cfg.get("method", "auto")).strip().lower()
 
         if not self.pose_csv:
             raise ValueError("projection.oblique.pose_csv is required for oblique mode")
         if not self.dsm_path:
             raise ValueError("projection.oblique.dsm_path is required for oblique mode")
+        if self.method not in {"auto", "affine", "collinearity"}:
+            raise ValueError("projection.oblique.method must be one of: auto, affine, collinearity")
         if not os.path.exists(self.pose_csv):
             raise FileNotFoundError(f"pose_csv not found: {self.pose_csv}")
         if not os.path.exists(self.dsm_path):
@@ -69,12 +72,12 @@ class ObliqueProjector:
         self.focal = float(cfg.get("focal", 3713.29))
         self.cx = float(cfg.get("cx", 2647.02))
         self.cy = float(cfg.get("cy", 1969.28))
-        self.avg_alt = float(cfg.get("avg_alt", 30.8))
+        self.avg_alt = float(cfg.get("avg_alt", 30.0))
         
         self.ray_dsm_max_iter = int(cfg.get("ray_dsm_max_iter", 8))
-        self.ray_dsm_tol = float(cfg.get("ray_dsm_tol", 0.01))
+        self.ray_dsm_tol = float(cfg.get("ray_dsm_tol", 1))
         self.ray_dsm_init_window = int(cfg.get("ray_dsm_init_window", 9))
-        self.ray_dsm_fallback_avg_alt = bool(cfg.get("ray_dsm_fallback_avg_alt", True))
+        self.ray_dsm_fallback_avg_alt = bool(cfg.get("ray_dsm_fallback_avg_alt", False))
         self.enable_alt_filter = bool(cfg.get("enable_alt_filter", False))
         
         self.sample_interval = int(cfg.get("sample_interval", 50))
@@ -88,6 +91,7 @@ class ObliqueProjector:
         self.enable_slope_correction = bool(cfg.get("enable_slope_correction", False))
 
         self._dsm_ds = gdal.Open(self.dsm_path)
+        self._dsm_ds_nodata = self._dsm_ds.GetRasterBand(1).GetNoDataValue() if self._dsm_ds is not None else None
         if self._dsm_ds is None:
             raise RuntimeError(f"Failed to open DSM: {self.dsm_path}")
 
@@ -98,6 +102,7 @@ class ObliqueProjector:
         preload = bool(cfg.get("preload_dsm", False))
         self._dsm_array = self._dsm_ds.ReadAsArray() if preload else None
         self._dsm_global_median = self._compute_dsm_center_median()
+        # print(f"global DSM median: {self._dsm_global_median}")
         self._last_dsm_z: Optional[float] = None
 
     def _read_dsm_value(self, col: int, row: int) -> Optional[float]:
@@ -106,7 +111,7 @@ class ObliqueProjector:
         if self._dsm_array is not None:
             return float(self._dsm_array[row, col])
 
-        arr = self._dsm_ds.ReadAsArray(col, row, 1, 1)
+        arr = self._dsm_ds.ReadAsArray(col, row, 1, 1) # type: ignore
         if arr is None:
             return None
         return float(arr[0][0])
@@ -138,7 +143,7 @@ class ObliqueProjector:
         if self._dsm_array is not None:
             block = self._dsm_array[r0:r1, c0:c1]
         else:
-            block = self._dsm_ds.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
+            block = self._dsm_ds.ReadAsArray(c0, r0, c1 - c0, r1 - r0) # type: ignore
         if block is None:
             return None
 
@@ -166,6 +171,7 @@ class ObliqueProjector:
         py = self.cy - float(img_y)
         gx, gy = photo_to_ground(px, py, self.focal, float(z0), xs, ys, zs, rot)
         col_f, row_f = geo_to_image_xy(self._dsm_geo, gx, gy)
+
         col = int(round(col_f))
         row = int(round(row_f))
         local = self._dsm_window_median(col, row, self.ray_dsm_init_window)
@@ -225,9 +231,8 @@ class ObliqueProjector:
             if hit is not None:
                 mapped.append((hit[0], hit[1]))
                 continue
-            if self.ray_dsm_fallback_avg_alt:
+            if self.ray_dsm_fallback_avg_alt and self.avg_alt is not None:
                 mapped.append(self._project_point_fallback_avg_alt(x, y, pose))
-
         return mapped
 
     def _build_affine_pairs(
@@ -249,7 +254,7 @@ class ObliqueProjector:
             hit = self._ray_dsm_intersection(cx, cy, pose)
             if hit is not None:
                 corner_hits.append((hit[0], hit[1]))
-            elif self.ray_dsm_fallback_avg_alt:
+            elif self.ray_dsm_fallback_avg_alt and self.avg_alt is not None:
                 corner_hits.append(self._project_point_fallback_avg_alt(cx, cy, pose))
 
         if not corner_hits:
@@ -293,9 +298,8 @@ class ObliqueProjector:
 
         # Read Z values with numpy indexing
         z_vals = dsm_block[rr_flat, cc_flat].astype(np.float64)
-
         if self.enable_alt_filter:
-            alt_mask = np.abs(z_vals - self.avg_alt) <= self.max_alt_diff
+            alt_mask = np.abs(z_vals - self._dsm_global_median) <= self.max_alt_diff
             cc_valid = cc_flat[alt_mask]
             rr_valid = rr_flat[alt_mask]
             z_valid = z_vals[alt_mask]
@@ -367,7 +371,16 @@ class ObliqueProjector:
         bbox = out.get("bbox", [0.0, 0.0, 0.0, 0.0])
 
         src_pts, dst_pts = self._build_affine_pairs(bbox=bbox, pose=pose)
-        use_affine = len(src_pts) >= self.min_control_points
+        if self.method == "affine":
+            if len(src_pts) < 3:
+                # raise ValueError("projection.oblique.method=affine requires at least 3 valid control points")
+                out["projection_method"] = "affine_failed"
+                return out
+            use_affine = True
+        elif self.method == "collinearity":
+            use_affine = False
+        else:
+            use_affine = len(src_pts) >= self.min_control_points
 
         transformed_seg: List[List[float]] = []
         if use_affine:

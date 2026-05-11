@@ -14,6 +14,14 @@ from projection.scoring import compute_pv_geometry_score
 _OBLIQUE_PROJECTOR_CACHE: Dict[str, ObliqueProjector] = {}
 
 
+def _oblique_cache_key(oblique_cfg: Dict[str, Any]) -> str:
+    pose_csv = str(oblique_cfg.get("pose_csv", "")).strip()
+    dsm_path = str(oblique_cfg.get("dsm_path", "")).strip()
+    method = str(oblique_cfg.get("method", "auto")).strip().lower()
+    min_control_points = int(oblique_cfg.get("min_control_points", 5))
+    return f"{pose_csv}::{dsm_path}::{method}::{min_control_points}"
+
+
 def _flat_to_pairs(flat_xy: Sequence[float]) -> List[Tuple[float, float]]:
     if len(flat_xy) < 6 or len(flat_xy) % 2 != 0:
         return []
@@ -100,9 +108,7 @@ def _project_dom_feature(feature: Feature, gt: Sequence[float]) -> Feature:
 
 
 def _get_oblique_projector(oblique_cfg: Dict[str, Any]) -> ObliqueProjector:
-    pose_csv = str(oblique_cfg.get("pose_csv", "")).strip()
-    dsm_path = str(oblique_cfg.get("dsm_path", "")).strip()
-    cache_key = f"{pose_csv}::{dsm_path}"
+    cache_key = _oblique_cache_key(oblique_cfg)
     if cache_key not in _OBLIQUE_PROJECTOR_CACHE:
         _OBLIQUE_PROJECTOR_CACHE[cache_key] = ObliqueProjector(oblique_cfg)
     return _OBLIQUE_PROJECTOR_CACHE[cache_key]
@@ -115,8 +121,8 @@ def _score_one_feature(feature: Feature, score_cfg: Dict[str, Any]) -> Feature:
     geom = _feature_to_geometry(out)
     if geom is None:
         out["con_pv"] = 0.0
-        out["con_sem"] = con_sem
-        out["con_weight"] = con_sem
+        out["con_sem"] = 0.0
+        out["con_weight"] = 0.0
         out["score"] = out["con_weight"]
         return out
 
@@ -180,7 +186,12 @@ def project_and_score_features(
             projector = _get_oblique_projector(oblique_cfg)
             out = projector.project_feature(feature=feature, image_path=image_path)
 
+        if out["projection_method"] == "affine_failed":
+            filtered += 1
+            continue
+        
         out = _score_one_feature(out, score_cfg=score_cfg)
+        
         if score_threshold > 0 and out.get("score", 0.0) < score_threshold:
             filtered += 1
             continue

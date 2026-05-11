@@ -2,7 +2,7 @@ _base_:
   - "./base.yaml"
 
 pipeline:
-  run_inference: true
+  run_inference: false
   run_projection: true
   run_postprocess: true
 
@@ -11,22 +11,37 @@ data:
   data_root: "/data/dataset/PV/003-XinXie/"
   image_glob: "images/*.JPG"
 
+projection:
+  oblique:
+    # Set to affine or collinearity to force a single projection path globally.
+    method: affine
+    # avg_alt: 37.5
+    sample_interval: 5
+    max_alt_diff: 2.0
+    search_margin_px: 10
+    ray_dsm_max_iter: 10
+    ray_dsm_tol: 1.0
+    ray_dsm_init_window: 9
+    ray_dsm_fallback_avg_alt: false
+    enable_alt_filter: true
+    min_control_points: 3
+
 postprocess:
   per_image_nms:
-    enabled: false
+    enabled: true
     backend: auto
     score_field: con_weight
     iou_threshold: 0.2
     use_geometry_iou: false
 
   view_selection: 
-    enabled: false
+    enabled: true
     view_num: 5
     distance_threshold: 0.5
     random_seed: 42
 
   multiview:
-    enabled: false
+    enabled: true
     strategy: nms_keep_max
     score_field: con_weight
     iou_threshold: 0.2
@@ -34,20 +49,21 @@ postprocess:
   prompt_export:
     enabled: true
     mode: oblique
-    output_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_1/views/view_5/prompts_mv_voting_ray_dsm/
+    output_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/prompts_mv_voting_ray_dsm_2/
     min_size: 50
     include_intersections: true
     use_spatial_index: true
+    min_confidence: 0.6
 
   dom_merge:
     enabled: false
 
 output:
-  per_image_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/proj_mv_voting_ray_dsm/
-  per_image_raw_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/infer_mv_voting_ray_dsm/
-  final_merged_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_mv_voting_ray_dsm.shp
+  per_image_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/proj_mv_voting_ray_dsm_2/
+  per_image_raw_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/infer_mv_voting_ray_dsm/
+  final_merged_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_mv_voting_ray_dsm.shp
   trace_exports:
     enabled: false
-    collected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_collected_ray_dsm.shp
-    selected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_4/views/view_5/view_5_selected_mv_voting_ray_dsm.shp
+    collected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_collected_ray_dsm.shp
+    selected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_selected_mv_voting_ray_dsm.shp
   
