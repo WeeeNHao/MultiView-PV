@@ -79,7 +79,7 @@ projection:
     image_height: 3956
     # performance / extension hooks
     preload_dsm: false
-    enable_slope_correction: false
+    enable_slope_correction: false # deprecated; 
   score:
     # mode: standard | legacy_gaussian
     mode: standard

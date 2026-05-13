@@ -26,12 +26,12 @@ run_round() {
   local enable_prompt="$3"
   local iter_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${iter_idx}"
   local view_dir="${iter_dir}/views"
-  local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting_ray_dsm"
-  local proj_dir="${view_dir}/view_${VIEW_NUM}/proj_mv_voting_ray_dsm"
-  local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting_ray_dsm"
-  local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting_ray_dsm.shp"
-  local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_ray_dsm.shp"
-  local selected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_selected_mv_voting_ray_dsm.shp"
+  local infer_dir="${view_dir}/view_${VIEW_NUM}/infer_mv_voting_slope_correction"
+  local proj_dir="${view_dir}/view_${VIEW_NUM}/proj_mv_voting_slope_correction"
+  local prompt_dir="${view_dir}/view_${VIEW_NUM}/prompts_mv_voting_slope_correction"
+  local final_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_mv_voting_slope_correction.shp"
+  local collected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_collected_slope_correction.shp"
+  local selected_shp="${view_dir}/view_${VIEW_NUM}/view_${VIEW_NUM}_selected_mv_voting_slope_correction.shp"
 
   mkdir -p "$infer_dir" "$prompt_dir" "$view_dir"
 
@@ -107,7 +107,7 @@ for ((i=1; i<ROUNDS; i++)); do
     run_round "$i" "" "0"
   else
     prev_idx=$((i - 1))
-    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/views/view_${VIEW_NUM}/prompts_mv_voting_ray_dsm"
+    prev_prompt_dir="${OUTPUT_ROOT}/${RUN_NAME_PREFIX}_${prev_idx}/views/view_${VIEW_NUM}/prompts_mv_voting_slope_correction"
     run_round "$i" "$prev_prompt_dir" "1"
   fi
 done

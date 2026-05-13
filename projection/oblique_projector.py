@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from osgeo import gdal
+from sklearn.linear_model import RANSACRegressor
 
 from utils.common import Feature
 from projection.collinearity import (
@@ -60,8 +62,8 @@ class ObliqueProjector:
             raise ValueError("projection.oblique.pose_csv is required for oblique mode")
         if not self.dsm_path:
             raise ValueError("projection.oblique.dsm_path is required for oblique mode")
-        if self.method not in {"auto", "affine", "collinearity"}:
-            raise ValueError("projection.oblique.method must be one of: auto, affine, collinearity")
+        if self.method not in {"auto", "affine", "collinearity", "slope_correction"}:
+            raise ValueError("projection.oblique.method must be one of: auto, affine, collinearity, slope_correction")
         if not os.path.exists(self.pose_csv):
             raise FileNotFoundError(f"pose_csv not found: {self.pose_csv}")
         if not os.path.exists(self.dsm_path):
@@ -81,7 +83,7 @@ class ObliqueProjector:
         self.enable_alt_filter = bool(cfg.get("enable_alt_filter", False))
         
         self.sample_interval = int(cfg.get("sample_interval", 50))
-        self.max_alt_diff = float(cfg.get("max_alt_diff", 3.0))
+        self.max_alt_diff = float(cfg.get("max_alt_diff", 1.0))
         self.search_margin_px = int(cfg.get("search_margin_px", 200))
         self.min_control_points = int(cfg.get("min_control_points", 5))
 
@@ -89,6 +91,12 @@ class ObliqueProjector:
         self.image_height = int(cfg.get("image_height", 3956))
 
         self.enable_slope_correction = bool(cfg.get("enable_slope_correction", False))
+
+        sc_cfg = cfg.get("slope_correction", {}) or {}
+        self.sc_ransac_threshold = float(sc_cfg.get("ransac_inlier_threshold", 0.3))
+        self.sc_min_inliers = int(sc_cfg.get("min_inliers", 5))
+        self.sc_max_tilt_deg = float(sc_cfg.get("max_tilt_deg", 60.0))
+        self.sc_ransac_max_trials = int(sc_cfg.get("ransac_max_trials", 100))
 
         self._dsm_ds = gdal.Open(self.dsm_path)
         self._dsm_ds_nodata = self._dsm_ds.GetRasterBand(1).GetNoDataValue() if self._dsm_ds is not None else None
@@ -208,6 +216,25 @@ class ObliqueProjector:
 
         return None
 
+    def _estimate_bbox_center_z(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        pose: Sequence[float],
+    ) -> Optional[float]:
+        bx = 0.5 * (float(x1) + float(x2))
+        by = 0.5 * (float(y1) + float(y2))
+        hit = self._ray_dsm_intersection(bx, by, pose)
+        if hit is None:
+            return None
+        gx, gy, _ = hit
+        col_f, row_f = geo_to_image_xy(self._dsm_geo, gx, gy)
+        col = int(round(col_f))
+        row = int(round(row_f))
+        return self._dsm_window_median(col, row, self.ray_dsm_init_window)
+
     def _project_point_fallback_avg_alt(
         self,
         img_x: float,
@@ -299,10 +326,18 @@ class ObliqueProjector:
         # Read Z values with numpy indexing
         z_vals = dsm_block[rr_flat, cc_flat].astype(np.float64)
         if self.enable_alt_filter:
-            alt_mask = np.abs(z_vals - self._dsm_global_median) <= self.max_alt_diff
-            cc_valid = cc_flat[alt_mask]
-            rr_valid = rr_flat[alt_mask]
-            z_valid = z_vals[alt_mask]
+            z_ref = self._estimate_bbox_center_z(x1, y1, x2, y2, pose)
+            if z_ref is None:
+                z_ref = self._dsm_global_median
+            if z_ref is None:
+                cc_valid = cc_flat
+                rr_valid = rr_flat
+                z_valid = z_vals
+            else:
+                alt_mask = np.abs(z_vals - z_ref) <= self.max_alt_diff
+                cc_valid = cc_flat[alt_mask]
+                rr_valid = rr_flat[alt_mask]
+                z_valid = z_vals[alt_mask]
         else:
             cc_valid = cc_flat
             rr_valid = rr_flat
@@ -353,9 +388,175 @@ class ObliqueProjector:
 
         return src_pts, dst_pts
 
-    def _apply_slope_correction_placeholder(self, mapped: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        # Placeholder hook for future plane/slope correction.
-        return mapped
+    def _sample_plane_points(
+        self,
+        bbox: Sequence[float],
+        pose: Sequence[float],
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        margin = float(self.search_margin_px)
+
+        corners = [
+            (x1 - margin, y1 - margin),
+            (x1 - margin, y2 + margin),
+            (x2 + margin, y2 + margin),
+            (x2 + margin, y1 - margin),
+        ]
+        corner_hits: List[Tuple[float, float]] = []
+        for cx, cy in corners:
+            hit = self._ray_dsm_intersection(cx, cy, pose)
+            if hit is not None:
+                corner_hits.append((hit[0], hit[1]))
+            elif self.ray_dsm_fallback_avg_alt and self.avg_alt is not None:
+                corner_hits.append(self._project_point_fallback_avg_alt(cx, cy, pose))
+
+        if not corner_hits:
+            return None
+
+        gx_min = float(min(p[0] for p in corner_hits))
+        gx_max = float(max(p[0] for p in corner_hits))
+        gy_min = float(min(p[1] for p in corner_hits))
+        gy_max = float(max(p[1] for p in corner_hits))
+
+        gt = self._dsm_geo
+        c0, r0 = geo_to_image_xy(gt, gx_min, gy_max)
+        c1r, r1r = geo_to_image_xy(gt, gx_max, gy_min)
+
+        col_min = max(0, min(int(min(c0, c1r)), self._dsm_w - 1))
+        col_max = max(0, min(int(max(c0, c1r)), self._dsm_w - 1))
+        row_min = max(0, min(int(min(r0, r1r)), self._dsm_h - 1))
+        row_max = max(0, min(int(max(r0, r1r)), self._dsm_h - 1))
+
+        if col_min >= col_max or row_min >= row_max:
+            return None
+
+        step = max(1, self.sample_interval)
+        block_w = col_max - col_min + 1
+        block_h = row_max - row_min + 1
+        if self._dsm_array is not None:
+            dsm_block = self._dsm_array[row_min:row_min + block_h, col_min:col_min + block_w]
+        else:
+            dsm_block = self._dsm_ds.ReadAsArray(col_min, row_min, block_w, block_h)
+        if dsm_block is None:
+            return None
+
+        local_cols = np.arange(0, block_w, step)
+        local_rows = np.arange(0, block_h, step)
+        cc, rr = np.meshgrid(local_cols, local_rows)
+        cc_flat = cc.ravel()
+        rr_flat = rr.ravel()
+
+        z_vals = dsm_block[rr_flat, cc_flat].astype(np.float64)
+        finite_mask = np.isfinite(z_vals)
+        if self._dsm_ds_nodata is not None:
+            finite_mask &= z_vals != float(self._dsm_ds_nodata)
+        cc_flat = cc_flat[finite_mask]
+        rr_flat = rr_flat[finite_mask]
+        z_vals = z_vals[finite_mask]
+        if z_vals.size == 0:
+            return None
+
+        z_ref = self._estimate_bbox_center_z(x1, y1, x2, y2, pose)
+        if z_ref is None:
+            z_ref = self._dsm_global_median
+        if z_ref is not None:
+            alt_mask = np.abs(z_vals - z_ref) <= self.max_alt_diff
+            cc_flat = cc_flat[alt_mask]
+            rr_flat = rr_flat[alt_mask]
+            z_vals = z_vals[alt_mask]
+        if z_vals.size == 0:
+            return None
+
+        abs_cols = (cc_flat + col_min).astype(np.float64)
+        abs_rows = (rr_flat + row_min).astype(np.float64)
+        gx = gt[0] + abs_cols * gt[1] + abs_rows * gt[2]
+        gy = gt[3] + abs_cols * gt[4] + abs_rows * gt[5]
+
+        return gx, gy, z_vals
+
+    def _fit_plane_ransac(
+        self,
+        gx: np.ndarray,
+        gy: np.ndarray,
+        gz: np.ndarray,
+    ) -> Optional[Tuple[float, float, float, int, float]]:
+        n = int(gz.size)
+        if n < max(3, self.sc_min_inliers):
+            return None
+
+        xy = np.column_stack([gx, gy])
+        try:
+            estimator = RANSACRegressor(
+                residual_threshold=float(self.sc_ransac_threshold),
+                max_trials=int(self.sc_ransac_max_trials),
+                min_samples=3,
+            )
+            estimator.fit(xy, gz)
+        except Exception:
+            return None
+
+        inlier_mask = estimator.inlier_mask_
+        inlier_count = int(np.count_nonzero(inlier_mask))
+        if inlier_count < self.sc_min_inliers:
+            return None
+
+        coef = estimator.estimator_.coef_
+        intercept = float(estimator.estimator_.intercept_)
+        a = float(coef[0])
+        b = float(coef[1])
+        c = intercept
+
+        tilt_rad = math.acos(1.0 / math.sqrt(1.0 + a * a + b * b))
+        if math.degrees(tilt_rad) > self.sc_max_tilt_deg:
+            return None
+
+        predicted = a * gx[inlier_mask] + b * gy[inlier_mask] + c
+        residuals = gz[inlier_mask] - predicted
+        rmse = float(np.sqrt(np.mean(residuals * residuals))) if residuals.size > 0 else 0.0
+
+        return a, b, c, inlier_count, rmse
+
+    def _ray_plane_intersect_batch(
+        self,
+        points_xy: Sequence[Tuple[float, float]],
+        pose: Sequence[float],
+        plane_abc: Tuple[float, float, float],
+    ) -> Optional[np.ndarray]:
+        if not points_xy:
+            return None
+
+        xs, ys, zs, phi, omega, kappa = pose
+        rot = build_rotation(phi, omega, kappa)
+        a1, a2, a3, b1, b2, b3, c1, c2, c3 = rot
+        a, b, c = plane_abc
+
+        pts = np.asarray(points_xy, dtype=np.float64)
+        px = pts[:, 0] - self.cx
+        py = self.cy - pts[:, 1]
+        pz = -float(self.focal)
+
+        dx = a1 * px + a2 * py + a3 * pz
+        dy = b1 * px + b2 * py + b3 * pz
+        dz = c1 * px + c2 * py + c3 * pz
+
+        den = dz - a * dx - b * dy
+        bad = np.abs(den) < 1e-9
+        den = np.where(bad, 1.0, den)
+        t = (c + a * float(xs) + b * float(ys) - float(zs)) / den
+
+        gx = float(xs) + t * dx
+        gy = float(ys) + t * dy
+        gz = float(zs) + t * dz
+
+        gx = np.where(bad, np.nan, gx)
+        gy = np.where(bad, np.nan, gy)
+        gz = np.where(bad, np.nan, gz)
+
+        out = np.column_stack([gx, gy, gz])
+        if not np.all(np.isfinite(out)):
+            return None
+        return out
+
 
     def project_feature(self, feature: Feature, image_path: str) -> Feature:
         out = dict(feature)
@@ -370,28 +571,33 @@ class ObliqueProjector:
         pose = [float(v) for v in pose_raw[:6]]
         bbox = out.get("bbox", [0.0, 0.0, 0.0, 0.0])
 
-        src_pts, dst_pts = self._build_affine_pairs(bbox=bbox, pose=pose)
+        if self.method == "slope_correction":
+            return self._project_feature_slope_correction(out, seg, bbox, pose)
+
         if self.method == "affine":
-            if len(src_pts) < 3:
-                # raise ValueError("projection.oblique.method=affine requires at least 3 valid control points")
-                out["projection_method"] = "affine_failed"
-                return out
             use_affine = True
+            src_pts, dst_pts = self._build_affine_pairs(bbox=bbox, pose=pose)
         elif self.method == "collinearity":
             use_affine = False
+            src_pts, dst_pts = [], []
         else:
+            src_pts, dst_pts = self._build_affine_pairs(bbox=bbox, pose=pose)
             use_affine = len(src_pts) >= self.min_control_points
 
         transformed_seg: List[List[float]] = []
         if use_affine:
+            if len(src_pts) < 3:
+                out["projection_method"] = "affine_failed"
+                return out
+
             mat2, vec, _ = compute_affine_transform(src_pts, dst_pts)
             for ring in seg:
                 points = _flat_to_pairs(ring)
                 if len(points) < 3:
                     continue
                 mapped = [(mat2[0, 0] * x + mat2[0, 1] * y + vec[0], mat2[1, 0] * x + mat2[1, 1] * y + vec[1]) for x, y in points]
-                if self.enable_slope_correction:
-                    mapped = self._apply_slope_correction_placeholder(mapped)
+                # if self.enable_slope_correction:
+                #     mapped = self._apply_slope_correction_placeholder(mapped)
                 transformed_seg.append(_pairs_to_flat(mapped))
         else:
             for ring in seg:
@@ -399,8 +605,8 @@ class ObliqueProjector:
                 if len(points) < 3:
                     continue
                 mapped = self._project_points_direct_collinearity(points, pose=pose)
-                if self.enable_slope_correction:
-                    mapped = self._apply_slope_correction_placeholder(mapped)
+                # if self.enable_slope_correction:
+                #     mapped = self._apply_slope_correction_placeholder(mapped)
                 transformed_seg.append(_pairs_to_flat(mapped))
 
         if transformed_seg:
@@ -408,6 +614,64 @@ class ObliqueProjector:
             out["bbox"] = _bbox_from_segmentation(transformed_seg)
             out["projection_method"] = "affine" if use_affine else "collinearity"
 
+        return out
+
+    def _project_feature_slope_correction(
+        self,
+        out: Feature,
+        seg: List[List[float]],
+        bbox: Sequence[float],
+        pose: Sequence[float],
+    ) -> Feature:
+        sampled = self._sample_plane_points(bbox=bbox, pose=pose)
+        if sampled is None:
+            out["projection_method"] = "slope_correction_failed"
+            return out
+        gx, gy, gz = sampled
+        if gz.size < self.sc_min_inliers:
+            out["projection_method"] = "slope_correction_failed"
+            return out
+
+        plane = self._fit_plane_ransac(gx, gy, gz)
+        if plane is None:
+            out["projection_method"] = "slope_correction_failed"
+            return out
+        a, b, c, inlier_count, rmse = plane
+
+        transformed_seg: List[List[float]] = []
+        elevations: List[List[float]] = []
+        for ring in seg:
+            points = _flat_to_pairs(ring)
+            if len(points) < 3:
+                continue
+            xyz = self._ray_plane_intersect_batch(points, pose, (a, b, c))
+            if xyz is None or xyz.shape[0] == 0:
+                continue
+            flat: List[float] = []
+            ring_z: List[float] = []
+            for i in range(xyz.shape[0]):
+                flat.append(float(xyz[i, 0]))
+                flat.append(float(xyz[i, 1]))
+                ring_z.append(float(xyz[i, 2]))
+            transformed_seg.append(flat)
+            elevations.append(ring_z)
+
+        if not transformed_seg:
+            out["projection_method"] = "slope_correction_failed"
+            return out
+
+        norm = math.sqrt(a * a + b * b + 1.0)
+        tilt_rad = math.acos(1.0 / norm)
+        azimuth_rad = math.atan2(a, b)
+
+        out["segmentation"] = transformed_seg
+        out["vertex_elevations"] = elevations
+        out["bbox"] = _bbox_from_segmentation(transformed_seg)
+        out["projection_method"] = "slope_correction"
+        out["tilt_angle"] = float(tilt_rad)
+        out["azimuth"] = float(azimuth_rad)
+        out["plane_fit_inliers"] = int(inlier_count)
+        out["plane_fit_rmse"] = float(rmse)
         return out
 
     def close(self) -> None:

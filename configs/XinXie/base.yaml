@@ -10,7 +10,7 @@ projection:
     ray_dsm_tol: 1.0
     ray_dsm_init_window: 9
     ray_dsm_fallback_avg_alt: false
-    enable_alt_filter: false
+    enable_alt_filter: true
     min_control_points: 3
     pose_csv: "/data/dataset/PV/003-XinXie/CAM/pose.csv"
     dsm_path: "/data/dataset/PV/003-XinXie/dsm/DSM.tif"

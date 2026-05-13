@@ -11,7 +11,7 @@ projection:
   score:
     mode: standard
     target_length: 2.20
-    target_width: 1.08
+    target_width: 1.09
     area_beta: 0.25
     ratio_beta: 0.2
     shape_beta: 0.1

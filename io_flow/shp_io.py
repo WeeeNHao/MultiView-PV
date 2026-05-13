@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Any, List, Optional, Sequence, Tuple
@@ -22,21 +23,41 @@ def _flat_to_pairs(flat_xy: Sequence[float]) -> List[Tuple[float, float]]:
     return [(float(flat_xy[i]), float(flat_xy[i + 1])) for i in range(0, len(flat_xy), 2)]
 
 
-def _segmentation_to_polygon(segmentation: Any) -> Optional[ogr.Geometry]:
+def _segmentation_to_polygon(
+    segmentation: Any,
+    vertex_elevations: Optional[Any] = None,
+) -> Optional[ogr.Geometry]:
     if not isinstance(segmentation, list) or not segmentation:
         return None
 
-    poly = ogr.Geometry(ogr.wkbPolygon)
-    for ring_data in segmentation:
+    use_z = (
+        isinstance(vertex_elevations, list)
+        and len(vertex_elevations) == len(segmentation)
+    )
+
+    poly = ogr.Geometry(ogr.wkbPolygon25D if use_z else ogr.wkbPolygon)
+    for ring_idx, ring_data in enumerate(segmentation):
         pts = _flat_to_pairs(ring_data)
         if len(pts) < 3:
             continue
 
+        ring_z: Optional[Sequence[float]] = None
+        if use_z:
+            candidate = vertex_elevations[ring_idx]
+            if isinstance(candidate, list) and len(candidate) == len(pts):
+                ring_z = candidate
+
         ring = ogr.Geometry(ogr.wkbLinearRing)
-        for x, y in pts:
-            ring.AddPoint(x, y)
-        if pts[0] != pts[-1]:
-            ring.AddPoint(pts[0][0], pts[0][1])
+        if ring_z is not None:
+            for (x, y), z in zip(pts, ring_z):
+                ring.AddPoint(x, y, float(z))
+            if pts[0] != pts[-1]:
+                ring.AddPoint(pts[0][0], pts[0][1], float(ring_z[0]))
+        else:
+            for x, y in pts:
+                ring.AddPoint(x, y)
+            if pts[0] != pts[-1]:
+                ring.AddPoint(pts[0][0], pts[0][1])
 
         if ring.GetPointCount() >= 4:
             poly.AddGeometry(ring)
@@ -76,7 +97,12 @@ def export_features_to_shapefile(
     if ds is None:
         raise RuntimeError(f"Cannot create output shapefile: {out_shp}")
 
-    layer = ds.CreateLayer("pv", srs=None, geom_type=ogr.wkbPolygon)
+    has_any_z = any(
+        isinstance(f.get("vertex_elevations"), list) and f.get("vertex_elevations")
+        for f in features
+    )
+    layer_geom_type = ogr.wkbPolygon25D if has_any_z else ogr.wkbPolygon
+    layer = ds.CreateLayer("pv", srs=None, geom_type=layer_geom_type)
 
     fields = [
         ("id", ogr.OFTInteger),
@@ -91,12 +117,19 @@ def export_features_to_shapefile(
         ("area_sc", ogr.OFTReal),
         ("ratio_sc", ogr.OFTReal),
         ("shape_sc", ogr.OFTReal),
+        ("method", ogr.OFTString),
+        ("tilt_deg", ogr.OFTReal),
+        ("azim_deg", ogr.OFTReal),
+        ("elev_mean", ogr.OFTReal),
+        ("pf_inlier", ogr.OFTInteger),
+        ("pf_rmse", ogr.OFTReal),
     ]
     for name, ftype in fields:
         layer.CreateField(ogr.FieldDefn(name, ftype))
 
     for idx, feature in enumerate(tqdm(features, desc="Writing shapefile", leave=False, position=2)):
-        geom = _segmentation_to_polygon(feature.get("segmentation"))
+        vert_z = feature.get("vertex_elevations")
+        geom = _segmentation_to_polygon(feature.get("segmentation"), vert_z)
         if geom is None:
             geom = _bbox_to_polygon(feature.get("bbox", []))
         if geom is None or geom.IsEmpty():
@@ -121,6 +154,28 @@ def export_features_to_shapefile(
         out_feat.SetField("area_sc", float(feature.get("area_score", 0.0)))
         out_feat.SetField("ratio_sc", float(feature.get("ratio_score", 0.0)))
         out_feat.SetField("shape_sc", float(feature.get("shape_score", 0.0)))
+
+        method = feature.get("projection_method")
+        if method is not None:
+            out_feat.SetField("method", str(method)[:240])
+        tilt = feature.get("tilt_angle")
+        if tilt is not None:
+            out_feat.SetField("tilt_deg", float(math.degrees(float(tilt))))
+        azim = feature.get("azimuth")
+        if azim is not None:
+            out_feat.SetField("azim_deg", float(math.degrees(float(azim))))
+        if isinstance(vert_z, list) and vert_z:
+            flat_z: List[float] = []
+            for ring_z in vert_z:
+                if isinstance(ring_z, list):
+                    flat_z.extend(float(v) for v in ring_z)
+            if flat_z:
+                out_feat.SetField("elev_mean", float(sum(flat_z) / len(flat_z)))
+        if feature.get("plane_fit_inliers") is not None:
+            out_feat.SetField("pf_inlier", int(feature.get("plane_fit_inliers")))
+        if feature.get("plane_fit_rmse") is not None:
+            out_feat.SetField("pf_rmse", float(feature.get("plane_fit_rmse")))
+
         layer.CreateFeature(out_feat)
         out_feat = None
 
@@ -133,32 +188,49 @@ def export_features_to_shapefile(
 
 
 def _geom_to_segmentation(geom: ogr.Geometry) -> List[List[float]]:
-    out: List[List[float]] = []
+    seg, _ = _geom_to_segmentation_with_z(geom)
+    return seg
+
+
+def _geom_to_segmentation_with_z(
+    geom: ogr.Geometry,
+) -> Tuple[List[List[float]], List[List[float]]]:
+    seg_out: List[List[float]] = []
+    z_out: List[List[float]] = []
     if geom is None or geom.IsEmpty():
-        return out
+        return seg_out, z_out
 
     gtype = geom.GetGeometryType()
+    has_z = gtype in (ogr.wkbPolygon25D, ogr.wkbMultiPolygon25D)
+
     if gtype in (ogr.wkbPolygon, ogr.wkbPolygon25D):
         for i in range(geom.GetGeometryCount()):
             ring = geom.GetGeometryRef(i)
             if ring is None:
                 continue
             flat: List[float] = []
+            zs: List[float] = []
             point_count = ring.GetPointCount()
             for pidx in range(point_count):
                 flat.append(float(ring.GetX(pidx)))
                 flat.append(float(ring.GetY(pidx)))
+                if has_z:
+                    zs.append(float(ring.GetZ(pidx)))
             if len(flat) >= 6:
-                out.append(flat)
-        return out
+                seg_out.append(flat)
+                if has_z:
+                    z_out.append(zs)
+        return seg_out, z_out
 
     if gtype in (ogr.wkbMultiPolygon, ogr.wkbMultiPolygon25D):
         for i in range(geom.GetGeometryCount()):
             sub = geom.GetGeometryRef(i)
-            out.extend(_geom_to_segmentation(sub))
-        return out
+            sub_seg, sub_z = _geom_to_segmentation_with_z(sub)
+            seg_out.extend(sub_seg)
+            z_out.extend(sub_z)
+        return seg_out, z_out
 
-    return out
+    return seg_out, z_out
 
 
 def read_features_from_shapefile(
@@ -183,7 +255,7 @@ def read_features_from_shapefile(
         geom = feat.GetGeometryRef()
         if geom is None or geom.IsEmpty():
             continue
-        seg = _geom_to_segmentation(geom)
+        seg, vert_z = _geom_to_segmentation_with_z(geom)
         env = geom.GetEnvelope()
         bbox = [float(env[0]), float(env[2]), float(env[1]), float(env[3])]
 
@@ -199,20 +271,33 @@ def read_features_from_shapefile(
         label = int(feat.GetField(label_field)) if label_field in field_names else 0
         src = str(feat.GetField(src_field)) if src_field in field_names else ""
 
-        features.append(
-            {
-                "bbox": bbox,
-                "segmentation": seg,
-                "geom": geom.Clone(),
-                "label": label,
-                "src": src,
-                "con_sem": con_sem,
-                "con_pv": con_pv,
-                "con_weight": con_weight,
-                "score": con_weight,
-                "area": float(geom.Area()),
-            }
-        )
+        record: Feature = {
+            "bbox": bbox,
+            "segmentation": seg,
+            "geom": geom.Clone(),
+            "label": label,
+            "src": src,
+            "con_sem": con_sem,
+            "con_pv": con_pv,
+            "con_weight": con_weight,
+            "score": con_weight,
+            "area": float(geom.Area()),
+        }
+        if vert_z:
+            record["vertex_elevations"] = vert_z
+        if "method" in field_names:
+            method_val = feat.GetField("method")
+            if method_val:
+                record["projection_method"] = str(method_val)
+        if "tilt_deg" in field_names:
+            tilt_val = feat.GetField("tilt_deg")
+            if tilt_val is not None:
+                record["tilt_angle"] = math.radians(float(tilt_val))
+        if "azim_deg" in field_names:
+            azim_val = feat.GetField("azim_deg")
+            if azim_val is not None:
+                record["azimuth"] = math.radians(float(azim_val))
+        features.append(record)
 
     ds = None
     return features
