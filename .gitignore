@@ -9,3 +9,5 @@ __pycache__/
 logs/
 tmp/
 __pycache__/*.pyc
+**/__pycache__/
+*.pyc

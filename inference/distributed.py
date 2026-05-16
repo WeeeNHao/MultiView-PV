@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import List, Sequence, TypeVar
-
+import datetime
 import torch
 import torch.distributed as dist
 
@@ -27,6 +27,7 @@ def maybe_init_distributed(backend: str | None = None) -> DistInfo:
             backend=backend,
             rank=info.rank,
             world_size=info.world_size,
+            timeout=datetime.timedelta(hours=2)
         )
     if torch.cuda.is_available():
         torch.cuda.set_device(info.local_rank)
