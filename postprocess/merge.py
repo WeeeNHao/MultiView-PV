@@ -11,9 +11,6 @@ def _score_of(feature: Dict[str, Any], score_field: str) -> float:
     return float(feature.get(score_field, 0.0))
 
 
-
-
-
 def _cluster_by_iou(
     features: List[Dict[str, Any]],
     score_field: str,

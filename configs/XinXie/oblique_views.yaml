@@ -2,10 +2,9 @@ _base_:
   - "./base.yaml"
 
 pipeline:
-  run_inference: false
+  run_inference: true
   run_projection: true
   run_postprocess: true
-
 
 data:
   data_root: "/data/dataset/PV/003-XinXie/"
@@ -67,7 +66,7 @@ output:
   per_image_raw_shp_dir: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/infer_mv_voting_ray_dsm/
   final_merged_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_mv_voting_slope_correction.shp
   trace_exports:
-    enabled: true
+    enabled: false
     collected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_collected_slope_correction.shp
     selected_shp: /data/dataset/PV/ZS_PV/003-XinXie/iter_0/views/view_5/view_5_selected_mv_voting_slope_correction.shp
   

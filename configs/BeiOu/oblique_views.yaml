@@ -2,30 +2,50 @@ _base_:
   - "./base.yaml"
 
 pipeline:
-  run_inference: false
+  run_inference: true
+  run_projection: true
+  run_postprocess: true
 
 
 data:
   data_root: "/data/dataset/PV/001-BeiOu/"
   image_glob: "images/*.JPG"
 
+projection:
+  oblique:
+    method: slope_correction # ["collinearity", "affine", "slope_correction"]
+    sample_interval: 5
+    max_alt_diff: 0.6
+    search_margin_px: 0
+    ray_dsm_max_iter: 10
+    ray_dsm_tol: 0.25
+    ray_dsm_init_window: 9
+    ray_dsm_fallback_avg_alt: false
+    enable_alt_filter: true
+    min_control_points: 3
+    slope_correction:
+      ransac_inlier_threshold: 0.2
+      ransac_max_trials: 100
+      min_inliers: 5
+      max_tilt_deg: 60
+
 postprocess:
   per_image_nms:
-    enabled: false
+    enabled: true
     backend: auto
     score_field: con_weight
     iou_threshold: 0.25
     use_geometry_iou: false
 
   view_selection: 
-    enabled: false
+    enabled: true
     view_num: 5
     iou_threshold: 0.25
     use_geometry_iou: false
     random_seed: 42
 
   multiview:
-    enabled: false
+    enabled: true
     strategy: nms_keep_max
     score_field: con_weight
     iou_threshold: 0.2
@@ -42,6 +62,7 @@ postprocess:
     enabled: false
 
 output:
+  per_image_raw_shp_dir: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/infer/
   per_image_shp_dir: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/infer/
   final_merged_shp: /data/dataset/PV/ZS_PV/001-BeiOu/iter_0/views/view_1.shp
   trace_exports:

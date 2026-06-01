@@ -408,7 +408,7 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
         nms_after_total = 0
         nms_elapsed = 0.0
         all_features: FeatureList = []
-        if per_image_nms_enabled and not os.path.exists(trace_collected_shp):
+        if per_image_nms_enabled:
             with run_logger.stage("collect_per_image_outputs"):
                 shp_files = _collect_rank_outputs(per_image_dir)
 
