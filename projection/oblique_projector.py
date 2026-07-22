@@ -82,13 +82,17 @@ class ObliqueProjector:
         self.ray_dsm_fallback_avg_alt = bool(cfg.get("ray_dsm_fallback_avg_alt", False))
         self.enable_alt_filter = bool(cfg.get("enable_alt_filter", False))
 
-        # Nearest-hit ray march (replaces the old seed-dependent fixed point).
-        # The search band is centred on a deterministic local surface estimate;
-        # march_up must exceed the tallest object standing above the local ground
-        # that a grazing ray may cross before reaching it (PV racking ~1-2 m).
+        # Nearest-hit ray march. The search band spans the DSM's own elevation
+        # range (plus a margin), so it carries no assumption about how many
+        # height regimes the site has -- 004-CangFang has PV on two surfaces
+        # ~9 m apart and the earlier band, anchored on a single global scalar,
+        # could only reach one of them.
+        self.ray_dsm_march_step = float(cfg.get("ray_dsm_march_step", 0.25))
+        self.ray_dsm_z_margin = float(cfg.get("ray_dsm_z_margin", 2.0))
+        self.ray_dsm_max_steps = int(cfg.get("ray_dsm_max_steps", 4096))
+        # Deprecated: kept so existing configs load, no longer bounds the march.
         self.ray_dsm_march_up = float(cfg.get("ray_dsm_march_up", 4.0))
         self.ray_dsm_march_down = float(cfg.get("ray_dsm_march_down", 4.0))
-        self.ray_dsm_march_step = float(cfg.get("ray_dsm_march_step", 0.25))
         
         self.sample_interval = int(cfg.get("sample_interval", 50))
         self.max_alt_diff = float(cfg.get("max_alt_diff", 1.0))
@@ -120,6 +124,89 @@ class ObliqueProjector:
         self._dsm_global_median = self._compute_dsm_center_median()
         # print(f"global DSM median: {self._dsm_global_median}")
         self._last_dsm_z: Optional[float] = None
+        self._dsm_geo_inv = None
+        self._dsm_z_min, self._dsm_z_max = self._compute_dsm_z_range(
+            cfg.get("ray_dsm_z_min", None), cfg.get("ray_dsm_z_max", None)
+        )
+
+    def _compute_dsm_z_range(
+        self,
+        z_min_cfg: Optional[float],
+        z_max_cfg: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Elevation range the ray march is allowed to search.
+
+        Taken from the DSM itself so that no single nominal height is baked in.
+        ``ray_dsm_z_min``/``ray_dsm_z_max`` override it for DSMs that extend
+        well beyond the area of interest (a narrower band is cheaper)."""
+        z_min = float(z_min_cfg) if z_min_cfg is not None else None
+        z_max = float(z_max_cfg) if z_max_cfg is not None else None
+        if z_min is not None and z_max is not None:
+            return z_min, z_max
+
+        stat_min = stat_max = None
+        if self._dsm_array is not None:
+            # Reduce in the array's own dtype with a `where` mask: materialising
+            # a float64 copy of a preloaded DSM costs gigabytes.
+            vals = self._dsm_array
+            mask = np.isfinite(vals)
+            if self._dsm_ds_nodata is not None:
+                mask &= vals != self._dsm_ds_nodata
+            if np.any(mask):
+                stat_min = float(np.min(vals, where=mask, initial=np.inf))
+                stat_max = float(np.max(vals, where=mask, initial=-np.inf))
+        else:
+            try:
+                # approx_ok=1: uses overviews/subsampling, and GDAL caches the
+                # result, so this stays cheap even on very large DSMs.
+                stats = self._dsm_ds.GetRasterBand(1).GetStatistics(1, 1)
+                stat_min, stat_max = float(stats[0]), float(stats[1])
+            except Exception:
+                stat_min = stat_max = None
+
+        if stat_min is None or stat_max is None or not np.isfinite([stat_min, stat_max]).all():
+            return z_min, z_max
+        return (z_min if z_min is not None else stat_min,
+                z_max if z_max is not None else stat_max)
+
+    def _geo_to_image_xy_batch(
+        self,
+        gx: np.ndarray,
+        gy: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if self._dsm_geo_inv is None:
+            gt = self._dsm_geo
+            m = np.array([[float(gt[1]), float(gt[2])],
+                          [float(gt[4]), float(gt[5])]], dtype=np.float64)
+            self._dsm_geo_inv = np.linalg.inv(m)
+        inv = self._dsm_geo_inv
+        dx = gx - float(self._dsm_geo[0])
+        dy = gy - float(self._dsm_geo[3])
+        return inv[0, 0] * dx + inv[0, 1] * dy, inv[1, 0] * dx + inv[1, 1] * dy
+
+    def _read_dsm_values(self, col_f: np.ndarray, row_f: np.ndarray) -> np.ndarray:
+        """DSM heights at many pixels at once; NaN off the raster or on nodata."""
+        col = np.rint(col_f).astype(np.int64)
+        row = np.rint(row_f).astype(np.int64)
+        out = np.full(col.shape, np.nan, dtype=np.float64)
+        inside = (col >= 0) & (row >= 0) & (col < self._dsm_w) & (row < self._dsm_h)
+        if not np.any(inside):
+            return out
+
+        if self._dsm_array is not None:
+            # Gather first, then let the float64 ``out`` upcast: converting the
+            # whole preloaded DSM per call would copy gigabytes every ray.
+            out[inside] = self._dsm_array[row[inside], col[inside]]
+        else:
+            for i in np.flatnonzero(inside):
+                value = self._read_dsm_value(int(col[i]), int(row[i]))
+                if value is not None:
+                    out[i] = value
+
+        out[~np.isfinite(out)] = np.nan
+        if self._dsm_ds_nodata is not None:
+            out[out == float(self._dsm_ds_nodata)] = np.nan
+        return out
 
     def _read_dsm_value(self, col: int, row: int) -> Optional[float]:
         if col < 0 or row < 0 or col >= self._dsm_w or row >= self._dsm_h:
@@ -190,6 +277,36 @@ class ObliqueProjector:
             return gx, gy, None
         return gx, gy, float(dsm_z)
 
+    def _ray_surface_probe_batch(
+        self,
+        px: float,
+        py: float,
+        z_levels: np.ndarray,
+        xs: float,
+        ys: float,
+        zs: float,
+        rot: Sequence[float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``_ray_surface_probe`` for a whole column of ray heights at once.
+
+        ``photo_to_ground`` is linear in z, so the ground track is just an
+        affine function of ``z_levels`` -- the march costs one DSM gather
+        instead of one Python iteration per step."""
+        a1, a2, a3, b1, b2, b3, c1, c2, c3 = rot
+        den = c1 * px + c2 * py - c3 * self.focal
+        if abs(den) < 1e-12:
+            gx = np.full(z_levels.shape, float(xs), dtype=np.float64)
+            gy = np.full(z_levels.shape, float(ys), dtype=np.float64)
+        else:
+            kx = (a1 * px + a2 * py - a3 * self.focal) / den
+            ky = (b1 * px + b2 * py - b3 * self.focal) / den
+            dz = z_levels - float(zs)
+            gx = dz * kx + float(xs)
+            gy = dz * ky + float(ys)
+
+        col_f, row_f = self._geo_to_image_xy_batch(gx, gy)
+        return gx, gy, self._read_dsm_values(col_f, row_f)
+
     def _ray_dsm_intersection(
         self,
         img_x: float,
@@ -205,65 +322,53 @@ class ObliqueProjector:
         centre, i.e. the FIRST crossing while marching the ray outward from the
         camera (decreasing z).
 
-        This is deterministic: the search is centred on a fixed nominal height
-        (the global DSM median), never on cross-feature state. The old fixed-point
-        iteration seeded from ``self._last_dsm_z`` was bistable on height steps and
-        thus order-dependent -- see analysis/.../id_1695/z_ref_bistability.md.
+        The march is deterministic and makes no assumption about the site's
+        height: it starts at the camera (capped just above the DSM's highest
+        point) and sweeps down to just below its lowest, so every surface the
+        ray can possibly meet is inside the search. An earlier version centred
+        a +-4 m band on a single global scalar and could only reach one height
+        regime -- on 004-CangFang, whose PV sits on two surfaces ~9 m apart,
+        that returned a phantom surface 22 m below the roof the camera saw.
+        See analysis/cangfang_two_heights/FINDINGS.md and
+        analysis/.../id_1695/z_ref_bistability.md.
         """
         xs, ys, zs, phi, omega, kappa = pose
         rot = build_rotation(phi, omega, kappa)
         px = float(img_x) - self.cx
         py = self.cy - float(img_y)
 
-        # Deterministic local surface estimate to centre the search band.
-        z_nom = self._dsm_global_median
-        if z_nom is None:
+        if self._dsm_z_min is None or self._dsm_z_max is None:
             return None
-        gx0, gy0 = photo_to_ground(px, py, self.focal, float(z_nom), xs, ys, zs, rot)
-        c0, r0 = geo_to_image_xy(self._dsm_geo, gx0, gy0)
-        z_center = self._dsm_window_median(int(round(c0)), int(round(r0)),
-                                           self.ray_dsm_init_window)
-        if z_center is None:
-            z_center = float(z_nom)
+        margin = float(self.ray_dsm_z_margin)
+        z_start = min(float(zs), float(self._dsm_z_max) + margin)
+        z_floor = float(self._dsm_z_min) - margin
+        if z_start <= z_floor:
+            return None
 
         step = max(self.ray_dsm_march_step, 1e-6)
-        z_floor = float(z_center) - self.ray_dsm_march_down
-        z_start = min(float(zs), float(z_center) + self.ray_dsm_march_up)
+        n = min(int((z_start - z_floor) / step) + 2, max(2, self.ray_dsm_max_steps))
+        z_levels = np.linspace(z_start, z_floor, n)      # camera -> outward
+        gx, gy, dsm_z = self._ray_surface_probe_batch(px, py, z_levels, xs, ys, zs, rot)
+        diff = z_levels - dsm_z                          # NaN wherever there is no DSM
 
-        # Guarantee the march begins ABOVE the surface (ray still in the air): if
-        # the start point already sits below a surface, climb toward the camera.
-        for _ in range(64):
-            if z_start >= float(zs):
-                break
-            _, _, dsm_z = self._ray_surface_probe(px, py, z_start, xs, ys, zs, rot)
-            if dsm_z is None or z_start - dsm_z > 0.0:
-                break
-            z_start = min(float(zs), z_start + self.ray_dsm_march_up)
+        # First crossing from "ray above the surface" to "ray below it".
+        above, below = diff[:-1], diff[1:]
+        crossing = np.isfinite(above) & np.isfinite(below) & (above > 0.0) & (below <= 0.0)
+        idx = np.flatnonzero(crossing)
+        if idx.size == 0:
+            return None
+        k = int(idx[0])
 
-        max_steps = min(int((z_start - z_floor) / step) + 2, 100000)
-        prev_z: Optional[float] = None
-        prev_diff: Optional[float] = None
-        z = z_start
-        for _ in range(max_steps):
-            gx, gy, dsm_z = self._ray_surface_probe(px, py, z, xs, ys, zs, rot)
-            if dsm_z is None:
-                prev_z, prev_diff = None, None       # off-DSM: drop the bracket
-            else:
-                diff = z - dsm_z
-                if diff == 0.0:
-                    self._last_dsm_z = float(dsm_z)
-                    return gx, gy, float(dsm_z)
-                if prev_diff is not None and prev_diff > 0.0 and diff < 0.0:
-                    hit = self._bisect_ray_surface(px, py, xs, ys, zs, rot,
-                                                   prev_z, z)
-                    if hit is not None:
-                        self._last_dsm_z = float(hit[2])
-                        return hit
-                prev_z, prev_diff = z, diff
-            z -= step
-            if z < z_floor:
-                break
-        return None
+        if below[k] == 0.0:
+            self._last_dsm_z = float(dsm_z[k + 1])
+            return float(gx[k + 1]), float(gy[k + 1]), float(dsm_z[k + 1])
+
+        hit = self._bisect_ray_surface(px, py, xs, ys, zs, rot,
+                                       float(z_levels[k]), float(z_levels[k + 1]))
+        if hit is None:
+            return None
+        self._last_dsm_z = float(hit[2])
+        return hit
 
     def _bisect_ray_surface(
         self,

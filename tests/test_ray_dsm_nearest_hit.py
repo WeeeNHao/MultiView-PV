@@ -43,6 +43,11 @@ def _make_projector():
     p.ray_dsm_march_up = 4.0
     p.ray_dsm_march_down = 4.0
     p.ray_dsm_march_step = 0.25
+    p._dsm_geo_inv = None
+    p.ray_dsm_z_margin = 2.0
+    p.ray_dsm_max_steps = 4096
+    p._dsm_z_min = float(np.min(p._dsm_array))
+    p._dsm_z_max = float(np.max(p._dsm_array))
     return p
 
 
@@ -101,6 +106,7 @@ def test_single_surface_ray_unchanged():
     p = _make_projector()
     p._dsm_array[:] = 10.0          # flat, no step
     p._dsm_global_median = 10.0
+    p._dsm_z_min = p._dsm_z_max = 10.0
     hit = p._ray_dsm_intersection(*PIXEL, POSE)
     assert hit is not None
     assert abs(hit[2] - 10.0) <= 0.1
