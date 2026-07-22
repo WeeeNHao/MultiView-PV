@@ -81,6 +81,14 @@ class ObliqueProjector:
         self.ray_dsm_init_window = int(cfg.get("ray_dsm_init_window", 9))
         self.ray_dsm_fallback_avg_alt = bool(cfg.get("ray_dsm_fallback_avg_alt", False))
         self.enable_alt_filter = bool(cfg.get("enable_alt_filter", False))
+
+        # Nearest-hit ray march (replaces the old seed-dependent fixed point).
+        # The search band is centred on a deterministic local surface estimate;
+        # march_up must exceed the tallest object standing above the local ground
+        # that a grazing ray may cross before reaching it (PV racking ~1-2 m).
+        self.ray_dsm_march_up = float(cfg.get("ray_dsm_march_up", 4.0))
+        self.ray_dsm_march_down = float(cfg.get("ray_dsm_march_down", 4.0))
+        self.ray_dsm_march_step = float(cfg.get("ray_dsm_march_step", 0.25))
         
         self.sample_interval = int(cfg.get("sample_interval", 50))
         self.max_alt_diff = float(cfg.get("max_alt_diff", 1.0))
@@ -161,29 +169,26 @@ class ObliqueProjector:
             return None
         return float(np.median(vals))
 
-    def _estimate_initial_z(
+    def _ray_surface_probe(
         self,
-        img_x: float,
-        img_y: float,
-        pose: Sequence[float],
-    ) -> Optional[float]:
-        z0 = self._last_dsm_z
-        if z0 is None:
-            z0 = self._dsm_global_median
-        if z0 is None:
-            return None
-
-        xs, ys, zs, phi, omega, kappa = pose
-        rot = build_rotation(phi, omega, kappa)
-        px = float(img_x) - self.cx
-        py = self.cy - float(img_y)
-        gx, gy = photo_to_ground(px, py, self.focal, float(z0), xs, ys, zs, rot)
+        px: float,
+        py: float,
+        z: float,
+        xs: float,
+        ys: float,
+        zs: float,
+        rot: Sequence[float],
+    ) -> Tuple[float, float, Optional[float]]:
+        """Ground point where the ray sits at height ``z`` plus the DSM height
+        there. dsm_z is None when the point is off the DSM or on nodata."""
+        gx, gy = photo_to_ground(px, py, self.focal, z, xs, ys, zs, rot)
         col_f, row_f = geo_to_image_xy(self._dsm_geo, gx, gy)
-
-        col = int(round(col_f))
-        row = int(round(row_f))
-        local = self._dsm_window_median(col, row, self.ray_dsm_init_window)
-        return local if local is not None else float(z0)
+        dsm_z = self._read_dsm_value(int(round(col_f)), int(round(row_f)))
+        if dsm_z is None or not np.isfinite(dsm_z):
+            return gx, gy, None
+        if self._dsm_ds_nodata is not None and dsm_z == float(self._dsm_ds_nodata):
+            return gx, gy, None
+        return gx, gy, float(dsm_z)
 
     def _ray_dsm_intersection(
         self,
@@ -191,30 +196,105 @@ class ObliqueProjector:
         img_y: float,
         pose: Sequence[float],
     ) -> Optional[Tuple[float, float, float]]:
+        """Nearest-hit ray/DSM intersection.
+
+        The camera ray ``P(z) = photo_to_ground(.., z)`` is a straight line, so a
+        grazing ray can cross the DSM surface more than once (e.g. a panel edge
+        and the ground behind it). The physically correct answer is the surface
+        the camera actually sees: the intersection nearest the perspective
+        centre, i.e. the FIRST crossing while marching the ray outward from the
+        camera (decreasing z).
+
+        This is deterministic: the search is centred on a fixed nominal height
+        (the global DSM median), never on cross-feature state. The old fixed-point
+        iteration seeded from ``self._last_dsm_z`` was bistable on height steps and
+        thus order-dependent -- see analysis/.../id_1695/z_ref_bistability.md.
+        """
         xs, ys, zs, phi, omega, kappa = pose
         rot = build_rotation(phi, omega, kappa)
-
         px = float(img_x) - self.cx
         py = self.cy - float(img_y)
 
-        z0 = self._estimate_initial_z(img_x, img_y, pose)
-        if z0 is None:
+        # Deterministic local surface estimate to centre the search band.
+        z_nom = self._dsm_global_median
+        if z_nom is None:
             return None
-        z = float(z0)
-        for _ in range(max(1, self.ray_dsm_max_iter)):
-            gx, gy = photo_to_ground(px, py, self.focal, z, xs, ys, zs, rot)
-            col_f, row_f = geo_to_image_xy(self._dsm_geo, gx, gy)
-            col = int(round(col_f))
-            row = int(round(row_f))
-            dsm_z = self._read_dsm_value(col, row)
-            if dsm_z is None or not np.isfinite(dsm_z):
-                return None
-            if abs(dsm_z - z) <= self.ray_dsm_tol:
-                self._last_dsm_z = float(dsm_z)
-                return gx, gy, float(dsm_z)
-            z = float(dsm_z)
+        gx0, gy0 = photo_to_ground(px, py, self.focal, float(z_nom), xs, ys, zs, rot)
+        c0, r0 = geo_to_image_xy(self._dsm_geo, gx0, gy0)
+        z_center = self._dsm_window_median(int(round(c0)), int(round(r0)),
+                                           self.ray_dsm_init_window)
+        if z_center is None:
+            z_center = float(z_nom)
 
+        step = max(self.ray_dsm_march_step, 1e-6)
+        z_floor = float(z_center) - self.ray_dsm_march_down
+        z_start = min(float(zs), float(z_center) + self.ray_dsm_march_up)
+
+        # Guarantee the march begins ABOVE the surface (ray still in the air): if
+        # the start point already sits below a surface, climb toward the camera.
+        for _ in range(64):
+            if z_start >= float(zs):
+                break
+            _, _, dsm_z = self._ray_surface_probe(px, py, z_start, xs, ys, zs, rot)
+            if dsm_z is None or z_start - dsm_z > 0.0:
+                break
+            z_start = min(float(zs), z_start + self.ray_dsm_march_up)
+
+        max_steps = min(int((z_start - z_floor) / step) + 2, 100000)
+        prev_z: Optional[float] = None
+        prev_diff: Optional[float] = None
+        z = z_start
+        for _ in range(max_steps):
+            gx, gy, dsm_z = self._ray_surface_probe(px, py, z, xs, ys, zs, rot)
+            if dsm_z is None:
+                prev_z, prev_diff = None, None       # off-DSM: drop the bracket
+            else:
+                diff = z - dsm_z
+                if diff == 0.0:
+                    self._last_dsm_z = float(dsm_z)
+                    return gx, gy, float(dsm_z)
+                if prev_diff is not None and prev_diff > 0.0 and diff < 0.0:
+                    hit = self._bisect_ray_surface(px, py, xs, ys, zs, rot,
+                                                   prev_z, z)
+                    if hit is not None:
+                        self._last_dsm_z = float(hit[2])
+                        return hit
+                prev_z, prev_diff = z, diff
+            z -= step
+            if z < z_floor:
+                break
         return None
+
+    def _bisect_ray_surface(
+        self,
+        px: float,
+        py: float,
+        xs: float,
+        ys: float,
+        zs: float,
+        rot: Sequence[float],
+        z_above: float,
+        z_below: float,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Refine the crossing between ``z_above`` (ray above the surface) and
+        ``z_below`` (ray below) by bisection on ray height."""
+        gx = gy = None
+        dsm_z: Optional[float] = None
+        for _ in range(40):
+            zm = 0.5 * (z_above + z_below)
+            gx, gy, dsm_z = self._ray_surface_probe(px, py, zm, xs, ys, zs, rot)
+            if dsm_z is None:
+                return None
+            diff = zm - dsm_z
+            if abs(diff) <= self.ray_dsm_tol:
+                return gx, gy, float(dsm_z)
+            if diff > 0.0:
+                z_above = zm
+            else:
+                z_below = zm
+        if dsm_z is None or gx is None:
+            return None
+        return gx, gy, float(dsm_z)
 
     def _estimate_bbox_center_z(
         self,
