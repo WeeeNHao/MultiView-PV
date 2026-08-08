@@ -319,6 +319,14 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
                 per_image_raw_dir=per_image_raw_dir,
             )
 
+        # Projection globs the raw dir and re-splits it across ranks, so every
+        # rank must have finished writing before any rank looks. Without this
+        # the fastest rank snapshots an incomplete directory and the images the
+        # slower ranks were still writing are silently never projected.
+        if run_inference and run_projection:
+            with run_logger.stage("barrier_after_inference"):
+                barrier_if_needed()
+
         if run_projection:
             mode = str(projection_cfg.get("mode", "auto")).lower()
             raw_shp_files = _collect_rank_outputs(per_image_raw_dir)
@@ -408,29 +416,32 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
         nms_after_total = 0
         nms_elapsed = 0.0
         all_features: FeatureList = []
-        if per_image_nms_enabled:
-            with run_logger.stage("collect_per_image_outputs"):
-                shp_files = _collect_rank_outputs(per_image_dir)
+        # Collection is unconditional: per-image NMS is an optional refinement
+        # of these features, not the reason to read them. Gating the read on it
+        # made every run with per_image_nms disabled silently fuse nothing.
+        with run_logger.stage("collect_per_image_outputs"):
+            shp_files = _collect_rank_outputs(per_image_dir)
 
-                pbar_shp = tqdm(shp_files, desc="Reading shapefiles")
-                for shp in pbar_shp:
-                    per_image_features = read_features_from_shapefile(shp_path=shp)
-                    if per_image_nms_enabled:
-                        nms_before_total += len(per_image_features)
-                        nms_start = time.perf_counter()
-                        per_image_features = nms_features(
-                            features=per_image_features,
-                            score_field=score_field,
-                            iou_threshold=iou_threshold,
-                            use_geometry_iou=use_geometry_iou,
-                            backend=nms_backend,
-                        )
-                        nms_elapsed += time.perf_counter() - nms_start
-                        nms_after_total += len(per_image_features)
-                    all_features.extend(per_image_features)
-                    pbar_shp.set_postfix(total=len(all_features), file=Path(shp).stem)
-            run_logger.info("collected features", count=len(all_features))
-            run_logger.event("feature_count", stage="collect", count=len(all_features))
+            pbar_shp = tqdm(shp_files, desc="Reading shapefiles")
+            for shp in pbar_shp:
+                per_image_features = read_features_from_shapefile(shp_path=shp)
+                if per_image_nms_enabled:
+                    nms_before_total += len(per_image_features)
+                    nms_start = time.perf_counter()
+                    per_image_features = nms_features(
+                        features=per_image_features,
+                        score_field=score_field,
+                        iou_threshold=iou_threshold,
+                        use_geometry_iou=use_geometry_iou,
+                        backend=nms_backend,
+                    )
+                    nms_elapsed += time.perf_counter() - nms_start
+                    nms_after_total += len(per_image_features)
+                all_features.extend(per_image_features)
+                pbar_shp.set_postfix(total=len(all_features), file=Path(shp).stem)
+        run_logger.info("collected features", count=len(all_features))
+        run_logger.event("feature_count", stage="collect", count=len(all_features))
+        if per_image_nms_enabled:
             run_logger.log_count_change("per_image_nms", nms_before_total, nms_after_total)
             run_logger.info("after per-image nms", count=nms_after_total, delta=nms_after_total - nms_before_total)
             run_logger.info("per-image nms time", time=nms_elapsed)
@@ -515,14 +526,22 @@ def run_pipeline(runtime_cfg: RuntimeConfig) -> None:
             run_logger.log_count_change("dom_merge", before, after, dom_shp=dom_shp)
             run_logger.info("after dom merge", count=after, delta=after - before)
 
-        if len(all_features) != 0:
-            with run_logger.stage("write_final_output", feature_count=len(all_features)):
-                export_features_to_shapefile(
-                    features=all_features,
-                    out_shp=final_merged_shp,
-                    projection_wkt=projection_wkt,
-                )
-            run_logger.info("final merged output", out_shp=final_merged_shp, count=len(all_features))
+        if len(all_features) == 0:
+            # Previously this wrote nothing and then tried to
+            # export prompts from the missing file, so an empty result surfaced
+            # as a confusing "No such file or directory" from OGR.
+            raise RuntimeError(
+                f"Postprocess produced 0 features, nothing written to {final_merged_shp}. "
+                f"Check per_image_shp_dir ({per_image_dir}) and the score thresholds."
+            )
+
+        with run_logger.stage("write_final_output", feature_count=len(all_features)):
+            export_features_to_shapefile(
+                features=all_features,
+                out_shp=final_merged_shp,
+                projection_wkt=projection_wkt,
+            )
+        run_logger.info("final merged output", out_shp=final_merged_shp, count=len(all_features))
 
         with run_logger.stage("export_bbox_prompts", shp=final_merged_shp):
             prompt_info = maybe_export_bbox_prompts(cfg=cfg, shp_path=final_merged_shp)

@@ -20,17 +20,24 @@ def get_dist_info() -> DistInfo:
 
 def maybe_init_distributed(backend: str | None = None) -> DistInfo:
     info = get_dist_info()
+    device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    # Running more ranks than GPUs packs several ranks onto one card, which is
+    # worth doing here because projection is CPU-bound and would otherwise leave
+    # the machine idle. NCCL does not support that layout, but the only
+    # collective this pipeline performs is a barrier, so gloo covers it.
+    oversubscribed = device_count > 0 and info.world_size > device_count
+
     if info.world_size > 1 and not dist.is_initialized():
-        if backend is None:
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if backend is None or oversubscribed:
+            backend = "gloo" if (oversubscribed or not torch.cuda.is_available()) else "nccl"
         dist.init_process_group(
             backend=backend,
             rank=info.rank,
             world_size=info.world_size,
             timeout=datetime.timedelta(hours=2)
         )
-    if torch.cuda.is_available():
-        torch.cuda.set_device(info.local_rank)
+    if device_count:
+        torch.cuda.set_device(info.local_rank % device_count)
     return info
 
 
