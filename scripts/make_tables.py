@@ -1,0 +1,562 @@
+#!/usr/bin/env python
+"""Render the draft's tables 1-8 as Markdown from the two result CSVs.
+
+Inputs (join key ``station, iter, variant``):
+    <eval-root>/all_stations_summary.csv   accuracy   (eval_0518_batch.py)
+    <eval-root>/run_stats.csv              cost       (collect_run_stats.py)
+
+Variant -> table row mapping follows experiments_plan.md sections 0.2c and 6:
+
+    ours    P / Ours, dual-source object-space fusion   tables 1,2,3,5,6,8
+    m1/m2/m3  the three baselines of draft table 0      tables 1,2
+    dom     SD: TDOM branch *with* the prior            table 5 "w/o perspective MV"
+    full    perspective-only main line                  table 3 "MV feedback only",
+                                                        table 5 "w/o TDOM"
+    d1..d5  cumulative camera-direction sets            table 7
+    abl_*   module-geometry prior ablation              table 4
+    fb_tdom_only  TDOM-only re-prompting                table 3 row 2
+
+Protocol: tables 1/2/6/8 report the last iteration (ITER_MAX); tables 3/4/5/7
+are pinned at t=1, except table 7's t=0 fallback when S7 has not run.
+
+A cell whose run does not exist on disk renders as ``--``; the table is emitted
+anyway, with a note listing what is missing, so partial progress is visible.
+
+Usage:
+    python scripts/make_tables.py > experiments_results.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import re
+import statistics
+import sys
+from typing import Dict, List, Optional, Sequence, Tuple
+
+ALL_STATIONS = ["001-BeiOu", "003-XinXie", "004-CangFang"]
+# Which stations the macro averages cover; narrowed by --stations so a finished
+# station can be tabulated on its own while the others are still running.
+STATIONS = list(ALL_STATIONS)
+MISSING = "--"
+
+_DIRSET_RE = re.compile(r"^d\d_")
+
+Key = Tuple[str, int, str]
+
+
+def _station_key(name: str) -> str:
+    """``001-BeiOu-exp2`` -> ``001-BeiOu``.
+
+    Matched against ALL_STATIONS, not the (possibly narrowed) STATIONS, so that
+    --stations filters what gets *reported* without changing how rows are keyed.
+    """
+    for s in ALL_STATIONS:
+        if name.startswith(s):
+            return s
+    return name
+
+
+def load_csv(path: str) -> Dict[Key, dict]:
+    if not os.path.isfile(path):
+        print(f"[tables] !! missing {path}", file=sys.stderr)
+        return {}
+    out: Dict[Key, dict] = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            out[(_station_key(row["station"]), int(row["iter"]), row["variant"])] = row
+    return out
+
+
+class Results:
+    def __init__(self, eval_rows: Dict[Key, dict], stat_rows: Dict[Key, dict],
+                 fallback_rows: Optional[Dict[Key, dict]] = None):
+        # PQ/SQ/RQ are exact functions of columns the evaluator has always
+        # written, so derive them when absent rather than forcing a re-eval:
+        #   SQ = obj_mIoU,  RQ == obj_F1 (TP/(TP+.5FP+.5FN) is the F1 identity),
+        #   PQ = SQ * RQ.
+        for row in eval_rows.values():
+            if not row.get("SQ"):
+                row["SQ"] = row.get("obj_mIoU", "")
+            if not row.get("RQ"):
+                row["RQ"] = row.get("obj_F1", "")
+            if not row.get("PQ"):
+                try:
+                    row["PQ"] = f"{float(row['SQ']) * float(row['RQ']):.6f}"
+                except (TypeError, ValueError):
+                    row["PQ"] = ""
+        self.acc = eval_rows
+        self.cost = stat_rows
+        self.cost_fallback = fallback_rows or {}
+        self.missing: List[str] = []
+
+    def get(self, station: str, iter_idx: int, variant: str) -> Optional[dict]:
+        row = self.acc.get((station, iter_idx, variant))
+        if row is None:
+            tag = f"{station} t={iter_idx} {variant}"
+            if tag not in self.missing:
+                self.missing.append(tag)
+        return row
+
+    def metric(self, station: str, iter_idx: int, variant: str, field: str,
+               fmt: str = "{:.4f}") -> str:
+        row = self.get(station, iter_idx, variant)
+        if row is None or row.get(field) in (None, ""):
+            return MISSING
+        try:
+            return fmt.format(float(row[field]))
+        except (TypeError, ValueError):
+            return str(row[field])
+
+    def has(self, variant: str) -> bool:
+        """Whether any station/iteration produced this variant."""
+        return any(k[2] == variant for k in self.acc)
+
+    def macro(self, iter_idx: int, variant: str, field: str,
+              fmt: str = "{:.4f}") -> str:
+        vals = self._station_values(iter_idx, variant, field)
+        if not vals:
+            return MISSING
+        return fmt.format(sum(vals) / len(vals))
+
+    def _station_values(self, iter_idx: int, variant: str,
+                        field: str) -> List[float]:
+        vals = []
+        for st in STATIONS:
+            # Route through get() rather than self.acc directly: it is what
+            # records the absence. Reading self.acc here made every macro table
+            # (1/3/4/5/6/8) render `--` silently, so a table that was entirely
+            # unrun carried no note saying so.
+            row = self.get(st, iter_idx, variant)
+            if row is None or row.get(field) in (None, ""):
+                continue
+            try:
+                vals.append(float(row[field]))
+            except (TypeError, ValueError):
+                pass
+        return vals
+
+    def cost_of(self, station: str, iter_idx: int, variant: str,
+                field: str) -> Optional[float]:
+        val = self._cost_from(self.cost, station, iter_idx, variant, field)
+        if not val:  # absent, or zero because the work was paid in another run
+            fallback = self._cost_from(self.cost_fallback, station, iter_idx,
+                                       variant, field)
+            if fallback:
+                return fallback
+        return val
+
+    @staticmethod
+    def _cost_from(table: Dict[Key, dict], station: str, iter_idx: int,
+                   variant: str, field: str) -> Optional[float]:
+        row = table.get((station, iter_idx, variant))
+        if row is None:
+            return None
+        try:
+            return float(row[field])
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    def cumulative_cost(self, variant: str, up_to_iter: int, field: str,
+                        include_shared: bool = True) -> str:
+        """Sum a cost field over t=0..up_to_iter, macro-averaged over stations.
+
+        The t=0 inference pass lives on its own ``shared`` row because every t=0
+        variant reads the same cache; it is added once here.
+        """
+        totals = []
+        for st in STATIONS:
+            total = 0.0
+            seen = False
+            if include_shared:
+                v = self.cost_of(st, 0, "shared", field)
+                if v is not None:
+                    total += v
+                    seen = True
+            for t in range(0, up_to_iter + 1):
+                v = self.cost_of(st, t, variant, field)
+                if v is not None:
+                    total += v
+                    seen = True
+            if seen:
+                totals.append(total)
+        if not totals:
+            return MISSING
+        avg = sum(totals) / len(totals)
+        return f"{avg:.0f}" if field == "sam3_calls" else f"{avg:.1f}"
+
+
+def md_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    out = ["| " + " | ".join(header) + " |",
+           "|" + "|".join(["---"] * len(header)) + "|"]
+    for r in rows:
+        out.append("| " + " | ".join(str(c) for c in r) + " |")
+    return "\n".join(out)
+
+
+# Accuracy columns shared by most tables: (csv field, header, format).
+#
+# AP75 used to sit here and was dropped: on these stations it reads 1.0000 for
+# every method that works at all, because object F1 is flat from IoU 0.50 to
+# 0.90. The strict thresholds are what actually separate configurations, and are
+# where iterative refinement shows up at all -- refinement improves boundaries,
+# not detection, so a loose threshold hides its entire contribution.
+#
+# Reported as three separate columns rather than their mean: the three move by
+# very different amounts (AP90 is already near-saturated while AP975 is not), so
+# averaging them buries exactly the resolution they were added to provide.
+# `AP_high` is still in the CSV for anyone who wants the single-number summary.
+INSTANCE = [
+    # RQ rather than a separate "Obj. F1" column: RQ = TP/(TP+.5FP+.5FN) is the
+    # F1 identity, so listing both would print the same number twice. Naming it
+    # RQ keeps it consistent with PQ = SQ x RQ, which is also in the table.
+    ("RQ", "RQ (=F1) ↑", "{:.4f}"),
+    ("SQ", "SQ ↑", "{:.4f}"),
+    ("PQ", "PQ ↑", "{:.4f}"),
+    ("AJI", "AJI ↑", "{:.4f}"),
+    ("AP95", "AP95 ↑", "{:.4f}"),
+]
+
+SEMANTIC = [
+    ("area_IoU", "Area IoU ↑", "{:.4f}"),
+    ("area_Dice", "Area Dice ↑", "{:.4f}"),
+    ("area_Prec", "Area Prec. ↑", "{:.4f}"),
+    ("area_Rec", "Area Rec. ↑", "{:.4f}"),
+]
+
+# Four instance-level and four semantic-level columns. AP90 and AP75 were
+# dropped: both read ~1.0000 for every method that works at all, because object
+# F1 is flat from IoU 0.50 to 0.90 here. PQ and SQ earn their place by splitting
+# the two failure modes apart -- M1 has SQ 0.84 with RQ 0.03, i.e. correct masks
+# shattered into fragments, which no single detection score expresses.
+CORE = INSTANCE + SEMANTIC
+
+
+def baseline_rows(r: Results, base: str, label: str) -> List[Tuple[str, str]]:
+    """The pixel-vote baseline, as default and (when run) tuned rows.
+
+    `min_votes=2` is an untuned default an order of magnitude below the useful
+    threshold -- it scores obj_F1 = 0.0000 on all three stations, which reads as
+    a strawman. Reporting the per-station tuned configuration beside it is what
+    makes the comparison defensible. Before any tuned run exists the table is
+    unchanged, so this is safe to leave in place.
+    """
+    tuned = f"{base}_tuned"
+    if not r.has(tuned):
+        return [(label, base)]
+    return [(f"{label} (default)", base), (f"{label} (tuned)", tuned)]
+
+
+def table1(r: Results, last: int) -> str:
+    methods = [("SAM3-TDOM-Iter", "m1")]
+    methods += baseline_rows(r, "m2", "SAM3-MV-PixelVote-Iter")
+    methods += baseline_rows(r, "m3", "SAM3-TDOM+MV-LateFusion-Iter")
+    methods += [("**Ours**", "ours")]
+    header = ["Method"] + [h for _, h, _ in CORE] + [
+        "Centroid RMSE (m) ↓", "#SAM3 calls ↓", "Runtime (min) ↓"]
+    rows = []
+    for label, variant in methods:
+        row = [label]
+        row += [r.macro(last, variant, f, fmt) for f, _, fmt in CORE]
+        row.append(r.macro(last, variant, "centroid_RMSE", "{:.3f}"))
+        row.append(r.cumulative_cost(variant, last, "sam3_calls"))
+        row.append(r.cumulative_cost(variant, last, "wall_minutes"))
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table2(r: Results, last: int) -> str:
+    methods = [("SAM3-TDOM-Iter", "m1")]
+    methods += baseline_rows(r, "m2", "SAM3-MV-PixelVote-Iter")
+    methods += baseline_rows(r, "m3", "SAM3-TDOM+MV-LateFusion-Iter")
+    methods += [("**Ours**", "ours")]
+    # Derived from STATIONS so a narrowed --stations does not leave headers
+    # pointing at columns that are no longer there.
+    header = ["Method"] + [f"{s.split('-', 1)[-1]} Obj. F1 ↑" for s in STATIONS] + \
+        ["Macro Avg. ↑", "Worst-site ↑", "Across-site Std. ↓"]
+    rows = []
+    for label, variant in methods:
+        vals = r._station_values(last, variant, "obj_F1")
+        row = [label] + [r.metric(st, last, variant, "obj_F1") for st in STATIONS]
+        if vals:
+            row.append(f"{sum(vals)/len(vals):.4f}")
+            row.append(f"{min(vals):.4f}")
+            row.append(f"{statistics.pstdev(vals):.4f}" if len(vals) > 1 else MISSING)
+        else:
+            row += [MISSING] * 3
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table3(r: Results) -> str:
+    configs = [
+        ("No iterative feedback (t=0)", 0, "ours"),
+        ("TDOM feedback only", 1, "fb_tdom_only"),
+        ("Perspective-MV feedback only", 1, "full"),
+        ("**Full dual-source feedback**", 1, "ours"),
+    ]
+    header = ["Configuration"] + [h for _, h, _ in CORE] + ["Runtime (min) ↓"]
+    rows = []
+    for label, t, variant in configs:
+        row = [label] + [r.macro(t, variant, f, fmt) for f, _, fmt in CORE]
+        row.append(r.cumulative_cost(variant, t, "wall_minutes"))
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table4(r: Results) -> str:
+    # Cumulative, not leave-one-out. Leave-one-out is uninformative here because
+    # the sub-scores are redundant for the dominant failure mode: a half-module
+    # fragment has 50% of the nominal area AND aspect ratio 1.0 instead of 2.0,
+    # so w_area and w_ratio each catch it alone and dropping either one barely
+    # moves the score. Adding them one at a time shows where the gain actually
+    # comes from.
+    #
+    # "area + rectangularity" needs no run of its own: with three sub-scores,
+    # keeping area and rectangularity *is* w_ratio=0, i.e. abl_no_ratio.
+    #
+    # The full-prior row is `full`, not `ours`. The ablations run with
+    # dom_merge disabled (see configs/*/oblique_views.yaml), so they are
+    # perspective-only; `ours` is dual-source, and using it here would confound
+    # the geometry prior with the TDOM branch.
+    # (a) cumulative, both orderings, and (b) leave-one-out. Reported together
+    # because either alone is misleading: RQ saturates the moment area joins, so
+    # a rectangularity-first curve makes rectangularity look inert, while
+    # leave-one-out understates area for the same reason. Read the strict
+    # columns (AP95/AJI/over-seg), not RQ, for what each term actually buys.
+    configs = [
+        ("No module-geometry prior", "abl_noprior"),
+        ("— cumulative, rectangularity first —", None),
+        ("+ rectangularity", "abl_only_shape"),
+        ("+ area + rectangularity", "abl_no_ratio"),
+        ("— cumulative, area first —", None),
+        ("+ area", "abl_only_area"),
+        ("+ area + rectangularity ", "abl_no_ratio"),
+        ("— leave-one-out from the full prior —", None),
+        ("w/o area", "abl_no_area"),
+        ("w/o rectangularity", "abl_no_shape"),
+        ("w/o aspect ratio", "abl_no_ratio"),
+        ("**Full prior (all three)**", "full"),
+    ]
+    header = ["Configuration", "RQ (=F1) ↑", "PQ ↑", "AJI ↑", "AP95 ↑",
+              "Obj. mIoU ↑", "Over-seg. ↓", "Under-seg. ↓"]
+    rows = []
+    for label, variant in configs:
+        if variant is None:          # section divider
+            rows.append([f"*{label}*"] + [""] * (len(header) - 1))
+            continue
+        rows.append([
+            label,
+            r.macro(1, variant, "RQ"),
+            r.macro(1, variant, "PQ"),
+            r.macro(1, variant, "AJI"),
+            r.macro(1, variant, "AP95"),
+            r.macro(1, variant, "obj_mIoU"),
+            r.macro(1, variant, "over_seg_rate"),
+            r.macro(1, variant, "under_seg_rate"),
+        ])
+    return md_table(header, rows)
+
+
+def table5(r: Results) -> str:
+    configs = [
+        ("Ours w/o perspective MV", "dom"),
+        ("Ours w/o TDOM", "full"),
+        ("**Full dual-source input**", "ours"),
+    ]
+    header = ["Configuration"] + [h for _, h, _ in CORE] + [
+        "Centroid RMSE (m) ↓", "Runtime (min) ↓"]
+    rows = []
+    for label, variant in configs:
+        row = [label] + [r.macro(1, variant, f, fmt) for f, _, fmt in CORE]
+        row.append(r.macro(1, variant, "centroid_RMSE", "{:.3f}"))
+        row.append(r.cumulative_cost(variant, 1, "wall_minutes"))
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table6(r: Results, last: int) -> str:
+    configs = baseline_rows(r, "m3", "Pixel-level score-weighted fusion")
+    configs += [("**Instance-level geometry fusion**", "ours")]
+    header = ["Fusion representation"] + [h for _, h, _ in CORE] + [
+        "Over-seg. ↓", "Under-seg. ↓", "Runtime (min) ↓"]
+    rows = []
+    for label, variant in configs:
+        row = [label] + [r.macro(last, variant, f, fmt) for f, _, fmt in CORE]
+        row.append(r.macro(last, variant, "over_seg_rate"))
+        row.append(r.macro(last, variant, "under_seg_rate"))
+        row.append(r.cumulative_cost(variant, last, "wall_minutes"))
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table7(r: Results, iter_idx: int) -> str:
+    sets = [
+        ("TDOM only", "dom", 0),
+        ("TDOM + Nadir", "d1_nadir", 1),
+        ("TDOM + Nadir + O1", "d2_o1", 2),
+        ("TDOM + Nadir + O1 + O2", "d3_o2", 3),
+        ("TDOM + Nadir + O1 + O2 + O3", "d4_o3", 4),
+        ("TDOM + Nadir + O1 + O2 + O3 + O4", "d5_o4", 5),
+    ]
+    header = ["Raw-view set", "# Oblique directions"] + [h for _, h, _ in CORE]
+    rows = []
+    for label, variant, n_dir in sets:
+        n_obl = max(n_dir - 1, 0)
+        row = [label, str(n_obl)]
+        row += [r.macro(iter_idx, variant, f, fmt) for f, _, fmt in CORE]
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def table8(r: Results, last: int) -> str:
+    header = ["Iteration t", "#Pred.", "TP", "FP", "FN"] + \
+        [h for _, h, _ in CORE] + ["Cumulative #SAM3 calls", "Cumulative runtime (min)"]
+    rows = []
+    for t in range(0, last + 1):
+        row = [str(t)]
+        for field in ("n_pred", "TP", "FP", "FN"):
+            row.append(r.macro(t, "ours", field, "{:.0f}"))
+        row += [r.macro(t, "ours", f, fmt) for f, _, fmt in CORE]
+        row.append(r.cumulative_cost("ours", t, "sam3_calls"))
+        row.append(r.cumulative_cost("ours", t, "wall_minutes"))
+        rows.append(row)
+    return md_table(header, rows)
+
+
+def per_station_dump(r: Results) -> str:
+    out = []
+    fields = [("n_pred", "#Pred"), ("area_IoU", "Area IoU"),
+              ("obj_Prec", "Prec"), ("obj_Rec", "Rec"), ("obj_F1", "F1"),
+              ("obj_mIoU", "mIoU"), ("AP95", "AP95"), ("PQ", "PQ"), ("AJI", "AJI"),
+              ("centroid_RMSE", "cRMSE"), ("over_seg", "Over"),
+              ("under_seg", "Under")]
+    for st in STATIONS:
+        keys = sorted((k for k in r.acc if k[0] == st), key=lambda k: (k[2], k[1]))
+        if not keys:
+            continue
+        out.append(f"\n### {st}\n")
+        rows = []
+        for k in keys:
+            row = r.acc[k]
+            cells = [k[2], str(k[1])]
+            for f, _ in fields:
+                v = row.get(f, "")
+                try:
+                    cells.append(f"{float(v):.4f}" if "." in str(v) else str(v))
+                except (TypeError, ValueError):
+                    cells.append(str(v))
+            rows.append(cells)
+        out.append(md_table(["Variant", "t"] + [h for _, h in fields], rows))
+    return "\n".join(out)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--eval-root", default="/data/dataset/PV/ZS_PV/eval_exp2")
+    p.add_argument("--extra-stats", default=None,
+                   help="Second run_stats.csv consulted only where the primary "
+                        "one reports no cost. Needed because -exp2 symlinks its "
+                        "t=0 inference cache back to -exp: the SAM3 calls for "
+                        "that pass were paid in the earlier run and are recorded "
+                        "there, so without this the t=0 row reads as free.")
+    p.add_argument("--iter-max", type=int, default=2)
+    p.add_argument("--table7-iter", type=int, default=None,
+                   help="iteration for table 7 (default: 1 if present, else 0)")
+    p.add_argument("--stations", default=None,
+                   help="Comma-separated subset to report (default: all three). "
+                        "Use to tabulate a finished station while the others "
+                        "are still running; macro columns then cover only these.")
+    args = p.parse_args(argv)
+
+    if args.stations:
+        global STATIONS
+        wanted = [s.strip() for s in args.stations.split(",") if s.strip()]
+        unknown = [s for s in wanted if s not in ALL_STATIONS]
+        if unknown:
+            print(f"[tables] unknown station(s): {unknown}; expected any of "
+                  f"{ALL_STATIONS}", file=sys.stderr)
+            return 1
+        STATIONS = wanted
+
+    r = Results(
+        load_csv(os.path.join(args.eval_root, "all_stations_summary.csv")),
+        load_csv(os.path.join(args.eval_root, "run_stats.csv")),
+        load_csv(args.extra_stats) if args.extra_stats else None,
+    )
+    if not r.acc:
+        print("[tables] no accuracy rows loaded", file=sys.stderr)
+        return 1
+
+    t7 = args.table7_iter
+    if t7 is None:
+        # Direction sets are d1_nadir..d5_o4. Matching on a bare "d" prefix also
+        # catches the DOM branch, which would claim table 7 has a t=1 it does
+        # not have.
+        t7 = 1 if any(k[1] == 1 and _DIRSET_RE.match(k[2]) for k in r.acc) else 0
+
+    last = args.iter_max
+    # "三站宏平均" is a lie whenever --stations narrows the report, and these
+    # headings get pasted straight into the paper.
+    scope = ("三站宏平均" if len(STATIONS) == len(ALL_STATIONS)
+             else (f"{STATIONS[0].split('-', 1)[1]} 单站" if len(STATIONS) == 1
+                   else f"{len(STATIONS)} 站宏平均"))
+    print(f"""# 实验结果（自动生成）
+
+> 来源：`{args.eval_root}/all_stations_summary.csv` + `run_stats.csv`
+> 生成命令：`python scripts/make_tables.py`
+> 实例级指标：`RQ`(=F1，检出) / `SQ`(匹配掩膜贴合度) / `PQ`(=SQ×RQ) /
+> `AJI`(面积加权，惩罚过分割与欠分割) / `AP95`(IoU 0.95 下的 AP)，匹配阈值 0.5。
+> 语义级指标：整体掩膜的 `IoU` / `Dice` / `Precision` / `Recall`。
+> 不报 AP50/AP75/AP90：本数据上 F1 在 IoU 0.50–0.90 之间完全饱和，三者同值。
+> 表 1/2/6/8 报 t={last}；表 3/4/5 固定在 t=1；表 7 报 t={t7}。
+> `{MISSING}` = 该配置尚未跑出结果。
+
+## 表 1：主实验总体结果（{scope}）
+
+{table1(r, last)}
+
+## 表 2：主实验逐电站结果
+
+{table2(r, last)}
+
+## 表 3：迭代反馈路径消融（t=1）
+
+{table3(r)}
+
+## 表 4：模块几何先验累积消融（t=1）
+
+{table4(r)}
+
+## 表 5：输入数据源消融（t=1）
+
+{table5(r)}
+
+## 表 6：融合单位消融（t={last}）
+
+{table6(r, last)}
+
+## 表 7：镜头方向增量分析（t={t7}）
+
+{table7(r, t7)}
+
+## 表 8：迭代收敛分析（Ours，{scope}）
+
+{table8(r, last)}
+
+## 附：逐站逐变体明细
+{per_station_dump(r)}
+""")
+
+    if r.missing:
+        print("\n> 缺失的运行（渲染为 `--`）：\n>")
+        for m in r.missing:
+            print(f"> - {m}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
