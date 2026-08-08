@@ -186,10 +186,23 @@ def project_and_score_features(
             projector = _get_oblique_projector(oblique_cfg)
             out = projector.project_feature(feature=feature, image_path=image_path)
 
-        if out["projection_method"] == "affine_failed":
+        # A failed projection returns the feature with its *pixel* coordinates
+        # untouched, so it must be dropped here or it reaches the output as a
+        # polygon at (0..5000, 0..4000) -- which then stretches the layer extent
+        # across 370 km and makes the result unopenable in QGIS.
+        #
+        # Matching the suffix rather than one literal: the oblique projector
+        # emits "affine_failed" *and* "slope_correction_failed" (4 sites), and
+        # only the former was checked. The bug stayed hidden because the
+        # geometry prior masks it -- a pixel polygon's area is 1e5-1e6, so
+        # area_sc -> 0, con_pv -> 0, and score_threshold filtered it one branch
+        # below. Remove the prior (or just its area term) and the guard is gone:
+        # BeiOu abl_noprior leaked 51/5489 such features, abl_no_area 4/2110.
+        if str(out.get("projection_method", "")).endswith("_failed"):
             filtered += 1
             continue
-        
+
+
         out = _score_one_feature(out, score_cfg=score_cfg)
         
         if score_threshold > 0 and out.get("score", 0.0) < score_threshold:

@@ -7,6 +7,9 @@ projection:
     pose_csv: "/data/dataset/PV/004-CangFang/CAM/pose.csv"
     dsm_path: "/data/dataset/PV/004-CangFang/dsm/DSM.tif"
     preload_dsm: true
+    # CGCS2000 / 3-degree Gauss-Kruger CM 114E -- matches DOM/DSM/GT.
+    # Must be set explicitly: the oblique path falls back to 4550 otherwise.
+    epsg: 4547
 
   score:
     mode: standard

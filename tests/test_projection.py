@@ -28,7 +28,10 @@ def test_oblique_projector_forces_affine_when_requested():
     out = projector.project_feature(feature, "dummy.jpg")
 
     assert out["projection_method"] == "affine"
-    assert out["segmentation"] == feature["segmentation"]
+    # compute_affine_transform solves via lstsq, so it recovers the identity
+    # transform only to floating-point precision (residual ~1e-16). Comparing
+    # exactly would fail on noise that carries no geometric meaning.
+    assert out["segmentation"][0] == pytest.approx(feature["segmentation"][0])
 
 
 def test_oblique_projector_forces_collinearity_when_requested():
@@ -55,7 +58,20 @@ def test_oblique_projector_forces_collinearity_when_requested():
     assert out["segmentation"] == [[1.0, 2.0, 3.0, 2.0, 3.0, 3.0]]
 
 
-def test_oblique_projector_rejects_forced_affine_without_enough_control_points():
+def test_forced_affine_without_enough_control_points_is_tagged_failed():
+    """Fewer than 3 pairs cannot determine an affine fit.
+
+    The contract is tag-and-drop, not raise: the feature comes back marked
+    ``affine_failed`` and *unchanged* -- still in image pixel coordinates -- and
+    ``project_and_score_features`` is what removes it (see
+    ``test_failed_projection_dropped.py``). Mapping it anyway with an
+    underdetermined lstsq solution is what produced oversized affine footprints.
+
+    This matters for the projection-method ablation: forcing
+    ``projection.oblique.method=affine`` makes every such feature disappear, so
+    that arm's recall loss is a real property of the method and must be counted,
+    not mistaken for a pipeline bug.
+    """
     projector = ObliqueProjector.__new__(ObliqueProjector)
     projector.method = "affine"
     projector.min_control_points = 999
@@ -68,8 +84,10 @@ def test_oblique_projector_rejects_forced_affine_without_enough_control_points()
         "bbox": [0.0, 0.0, 2.0, 1.0],
     }
 
-    with pytest.raises(ValueError, match="projection.oblique.method=affine requires at least 3 valid control points"):
-        projector.project_feature(feature, "dummy.jpg")
+    out = projector.project_feature(feature, "dummy.jpg")
+
+    assert out["projection_method"] == "affine_failed"
+    assert out["segmentation"] == feature["segmentation"]
 
 def test_collinearity_roundtrip():
     # Camera parameters

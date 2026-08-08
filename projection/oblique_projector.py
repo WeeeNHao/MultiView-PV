@@ -109,6 +109,20 @@ class ObliqueProjector:
         self.sc_min_inliers = int(sc_cfg.get("min_inliers", 5))
         self.sc_max_tilt_deg = float(sc_cfg.get("max_tilt_deg", 60.0))
         self.sc_ransac_max_trials = int(sc_cfg.get("ransac_max_trials", 100))
+        # RANSAC draws its candidate triplets at random. Left unseeded it used
+        # the global RNG, so an ambiguous cloud gave a different plane on every
+        # call -- the same feature's tilt varied by ~5 deg between two calls in
+        # one process, which is what made the diagnostic's fit and
+        # project_feature's fit disagree by 4-5 m.
+        self.sc_ransac_random_state = int(sc_cfg.get("ransac_random_state", 0))
+        # How many competing surfaces to peel off before giving up on finding
+        # the one the feature actually rests on.
+        self.sc_anchor_max_candidates = int(sc_cfg.get("anchor_max_candidates", 4))
+        # Only sample cells this close to the feature's own ground point are
+        # fitted. A panel is ~2.2 m across and rows repeat every ~4.8 m, so this
+        # keeps the whole panel while excluding the neighbouring row. Set to 0
+        # to disable and fit the whole sampled window.
+        self.sc_anchor_radius_m = float(sc_cfg.get("anchor_radius_m", 2.0))
 
         self._dsm_ds = gdal.Open(self.dsm_path)
         self._dsm_ds_nodata = self._dsm_ds.GetRasterBand(1).GetNoDataValue() if self._dsm_ds is not None else None
@@ -659,47 +673,128 @@ class ObliqueProjector:
 
         return gx, gy, z_vals
 
-    def _fit_plane_ransac(
+    def _fit_one_plane(
         self,
-        gx: np.ndarray,
-        gy: np.ndarray,
+        xy: np.ndarray,
         gz: np.ndarray,
-    ) -> Optional[Tuple[float, float, float, int, float]]:
-        n = int(gz.size)
-        if n < max(3, self.sc_min_inliers):
-            return None
-
-        xy = np.column_stack([gx, gy])
+    ) -> Optional[Tuple[float, float, float, np.ndarray]]:
+        """Single seeded RANSAC pass. Returns (a, b, c, inlier_mask)."""
         try:
             estimator = RANSACRegressor(
                 residual_threshold=float(self.sc_ransac_threshold),
                 max_trials=int(self.sc_ransac_max_trials),
                 min_samples=3,
+                random_state=int(self.sc_ransac_random_state),
             )
             estimator.fit(xy, gz)
         except Exception:
             return None
 
-        inlier_mask = estimator.inlier_mask_
-        inlier_count = int(np.count_nonzero(inlier_mask))
-        if inlier_count < self.sc_min_inliers:
-            return None
-
         coef = estimator.estimator_.coef_
-        intercept = float(estimator.estimator_.intercept_)
-        a = float(coef[0])
-        b = float(coef[1])
-        c = intercept
+        return (
+            float(coef[0]),
+            float(coef[1]),
+            float(estimator.estimator_.intercept_),
+            estimator.inlier_mask_,
+        )
 
-        tilt_rad = math.acos(1.0 / math.sqrt(1.0 + a * a + b * b))
-        if math.degrees(tilt_rad) > self.sc_max_tilt_deg:
+    def _fit_plane_ransac(
+        self,
+        gx: np.ndarray,
+        gy: np.ndarray,
+        gz: np.ndarray,
+        anchor: Optional[Sequence[float]] = None,
+    ) -> Optional[Tuple[float, float, float, int, float]]:
+        """Fit the panel plane to the sampled DSM cells.
+
+        The sample window is the ground bounding box of the bbox corners, which
+        at grazing incidence is much wider than the panel and can straddle the
+        neighbouring panel row. Rows are a sawtooth, so each is its own
+        consensus set and a plain "largest set wins" vote picks whichever row
+        contributed more cells -- for one XinXie feature that was the wrong row
+        by 8% of the samples, putting the footprint 1.65 m off its panel.
+
+        ``anchor`` is the ground point the feature's own centroid ray hits. When
+        given, candidate surfaces are peeled off until one contains it, so the
+        fit follows the feature rather than the sample count. Falls back to the
+        largest surface if no candidate contains the anchor.
+        """
+        n = int(gz.size)
+        if n < max(3, self.sc_min_inliers):
             return None
 
-        predicted = a * gx[inlier_mask] + b * gy[inlier_mask] + c
-        residuals = gz[inlier_mask] - predicted
-        rmse = float(np.sqrt(np.mean(residuals * residuals))) if residuals.size > 0 else 0.0
+        if anchor is not None:
+            # Restricting to the feature's own neighbourhood is what actually
+            # removes the ambiguity: with the neighbouring row out of the cloud
+            # there is only one consensus set left to find. Anchor containment
+            # alone is too weak -- a plane cutting across both rows can pass
+            # through the anchor while carrying nowhere near the panel's tilt.
+            radius = float(self.sc_anchor_radius_m)
+            if radius > 0.0:
+                ax, ay = float(anchor[0]), float(anchor[1])
+                near = ((gx - ax) ** 2 + (gy - ay) ** 2) <= radius * radius
+                if int(np.count_nonzero(near)) >= max(3, self.sc_min_inliers):
+                    local = self._search_plane(gx[near], gy[near], gz[near], anchor)
+                    if local is not None:
+                        return local
 
-        return a, b, c, inlier_count, rmse
+        return self._search_plane(gx, gy, gz, anchor)
+
+    def _search_plane(
+        self,
+        gx: np.ndarray,
+        gy: np.ndarray,
+        gz: np.ndarray,
+        anchor: Optional[Sequence[float]],
+    ) -> Optional[Tuple[float, float, float, int, float]]:
+        """Peel candidate surfaces until one contains ``anchor``."""
+        n = int(gz.size)
+        if n < max(3, self.sc_min_inliers):
+            return None
+
+        xy = np.column_stack([gx, gy])
+        remaining = np.ones(n, dtype=bool)
+        fallback: Optional[Tuple[float, float, float, int, float]] = None
+        attempts = max(1, int(self.sc_anchor_max_candidates)) if anchor is not None else 1
+
+        for _ in range(attempts):
+            idx = np.flatnonzero(remaining)
+            if idx.size < max(3, self.sc_min_inliers):
+                break
+
+            fitted = self._fit_one_plane(xy[idx], gz[idx])
+            if fitted is None:
+                break
+            a, b, c, local_mask = fitted
+
+            inlier_count = int(np.count_nonzero(local_mask))
+            if inlier_count < self.sc_min_inliers:
+                break
+
+            tilt_rad = math.acos(1.0 / math.sqrt(1.0 + a * a + b * b))
+            if math.degrees(tilt_rad) > self.sc_max_tilt_deg:
+                # Unusable as an answer, but still a real surface: drop its
+                # cells so the next pass can see past it.
+                remaining[idx[local_mask]] = False
+                continue
+
+            sel = idx[local_mask]
+            residuals = gz[sel] - (a * gx[sel] + b * gy[sel] + c)
+            rmse = float(np.sqrt(np.mean(residuals * residuals))) if residuals.size > 0 else 0.0
+            candidate = (a, b, c, inlier_count, rmse)
+
+            if fallback is None:
+                fallback = candidate
+            if anchor is None:
+                return candidate
+
+            ax, ay, az = (float(v) for v in anchor[:3])
+            if abs(a * ax + b * ay + c - az) <= self.sc_ransac_threshold:
+                return candidate
+
+            remaining[sel] = False
+
+        return fallback
 
     def _ray_plane_intersect_batch(
         self,
@@ -817,7 +912,12 @@ class ObliqueProjector:
             out["projection_method"] = "slope_correction_failed"
             return out
 
-        plane = self._fit_plane_ransac(gx, gy, gz)
+        # Where the feature itself sits: the sample window may cover several
+        # panel rows, and only this one belongs to the feature being projected.
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        anchor = self._ray_dsm_intersection((x1 + x2) * 0.5, (y1 + y2) * 0.5, pose)
+
+        plane = self._fit_plane_ransac(gx, gy, gz, anchor=anchor)
         if plane is None:
             out["projection_method"] = "slope_correction_failed"
             return out
