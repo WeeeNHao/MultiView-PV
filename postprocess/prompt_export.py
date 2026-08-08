@@ -32,16 +32,24 @@ def _as_dict(cfg: Dict[str, Any], key: str) -> Dict[str, Any]:
     return {}
 
 
-def _resolve_mode(cfg: Dict[str, Any]) -> str:
+def _resolve_modes(cfg: Dict[str, Any]) -> List[str]:
+    """Which prompt flavours to emit from one fused result.
+
+    ``both`` drives the dual-source feedback loop (draft table 3, Full row):
+    a single object-space result re-prompts the perspective images *and* the
+    TDOM in the next round.
+    """
     prompt_cfg = _as_dict(_as_dict(cfg, "postprocess"), "prompt_export")
     mode = str(prompt_cfg.get("mode", "auto")).strip().lower()
+    if mode in {"both", "dual"}:
+        return ["oblique", "dom"]
     if mode in {"oblique", "dom"}:
-        return mode
+        return [mode]
 
     projection_mode = str(_as_dict(cfg, "projection").get("mode", "auto")).strip().lower()
     if projection_mode == "dom":
-        return "dom"
-    return "oblique"
+        return ["dom"]
+    return ["oblique"]
 
 
 def _normalize_image_name(name_or_path: str) -> str:
@@ -432,10 +440,17 @@ def _export_dom_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict[str
     data_cfg = _as_dict(cfg, "data")
     output_cfg = _as_dict(cfg, "output")
 
-    img_paths = resolve_image_paths(data_cfg)
-    if not img_paths:
-        raise ValueError("No DOM image found from data config")
-    dom_path = img_paths[0]
+    # In a dual-source round this runs inside an oblique pass, where
+    # data.image_glob resolves to the perspective images -- taking [0] there
+    # would treat a JPG as the DOM. An explicit dom_image wins when set.
+    dom_path = str(prompt_cfg.get("dom_image", "")).strip()
+    if not dom_path:
+        img_paths = resolve_image_paths(data_cfg)
+        if not img_paths:
+            raise ValueError("No DOM image found from data config")
+        dom_path = img_paths[0]
+    if not os.path.isfile(dom_path):
+        raise FileNotFoundError(f"DOM raster for prompt export not found: {dom_path}")
 
     output_txt = str(prompt_cfg.get("output_txt", "")).strip()
     if not output_txt:
@@ -497,7 +512,14 @@ def maybe_export_bbox_prompts(cfg: Dict[str, Any], shp_path: str) -> Optional[Di
     if not bool(prompt_cfg.get("enabled", False)):
         return None
 
-    mode = _resolve_mode(cfg)
-    if mode == "dom":
-        return _export_dom_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg)
-    return _export_oblique_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg)
+    modes = _resolve_modes(cfg)
+    results: List[Dict[str, Any]] = []
+    for mode in modes:
+        if mode == "dom":
+            results.append(_export_dom_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg))
+        else:
+            results.append(_export_oblique_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg))
+
+    if len(results) == 1:
+        return results[0]
+    return {"mode": "both", "exports": results}

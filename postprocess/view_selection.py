@@ -96,8 +96,8 @@ def select_views_from_features(
         # if len(cluster_list) <= view_num // 2:
         #     continue
         k = min(len(cluster_list), view_num)
-        if k < view_num // 2:
-            continue
+        # if k < view_num // 2:
+        #     continue
         selected_indices = rng.sample(cluster_list, k=k)
         for idx_sel in selected_indices:
             selected_features.append(features[idx_sel])

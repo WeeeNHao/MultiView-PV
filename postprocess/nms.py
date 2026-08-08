@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import uuid
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from tqdm import tqdm
@@ -77,7 +75,27 @@ def _geometry_iou(f1: Dict[str, Any], f2: Dict[str, Any]) -> float:
     if g1 is None or g2 is None:
         return _bbox_iou(f1["bbox"], f2["bbox"])
 
-    inter = g1.Intersection(g2)
+    # GEOS raises TopologyException on some self-intersecting rings, and this is
+    # the pipeline's only overlay call -- an uncaught throw here kills the whole
+    # run. XinXie's abl_noprior lost 14 h to exactly that: one pair out of
+    # 59 869 fused features, 4.7% of which are invalid because grazing ray/plane
+    # intersections push vertices to Z = -40 km and flip the ring order. The
+    # module-geometry prior normally filters those on area, so only the no-prior
+    # ablation reaches this code with them.
+    #
+    # Buffer(0) is the standard repair; if even that throws, fall back to bbox
+    # IoU rather than aborting. A slightly wrong IoU for one pair costs far less
+    # than a dead run.
+    try:
+        inter = g1.Intersection(g2)
+    except Exception:
+        try:
+            g1 = g1.Buffer(0)
+            g2 = g2.Buffer(0)
+            inter = g1.Intersection(g2)
+        except Exception:
+            return _bbox_iou(f1["bbox"], f2["bbox"])
+
     if inter is None or inter.IsEmpty():
         return 0.0
     inter_area = inter.Area()
@@ -183,11 +201,10 @@ def _nms_features_rtree(
     kept: List[Dict[str, Any]] = []
     suppressed_count = 0
 
-    tmp_dir = os.path.join(os.path.dirname(__file__), "..", "tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-    index_path = os.path.join(tmp_dir, f"nms_rtree_{uuid.uuid4().hex}")
-
-    idx = _rtree_index.Index(index_path)
+    # In-memory R-tree (no path): a disk-backed index would create and fsync
+    # .dat/.idx files, which is needlessly slow -- and pathological on a network
+    # filesystem -- for a transient, per-call spatial index.
+    idx = _rtree_index.Index()
     try:
         pbar = tqdm(ordered, desc="NMS", leave=False)
         for cand in pbar:
@@ -213,11 +230,4 @@ def _nms_features_rtree(
             pbar.set_postfix(kept=len(kept), drop=suppressed_count)
     finally:
         idx.close()
-        for ext in (".dat", ".idx"):
-            fpath = index_path + ext
-            if os.path.exists(fpath):
-                try:
-                    os.remove(fpath)
-                except OSError:
-                    pass
     return kept
