@@ -11,3 +11,6 @@ tmp/
 __pycache__/*.pyc
 **/__pycache__/
 *.pyc
+# One-off investigation dumps (probe scripts + 22MB of per-feature CSV/PNG).
+# Regenerable from the probes; findings are recorded in experiments_plan.md.
+analysis/
