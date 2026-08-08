@@ -1,6 +1,16 @@
 # 实验结果表格草案
 
-> 状态：讨论稿。`—` 表示待填实验结果。
+> 状态：定义稿。本文件定义**每张表有哪些行、哪些列、每行是什么配置**；
+> 数值由 `python scripts/make_tables.py` 生成到 `experiments_results.md`，
+> 并由 `python scripts/check_tables.py` 从 CSV 独立重算校验。
+> 两处不重复存数值，避免漂移。`—` 表示该行尚未跑出结果。
+>
+> **迭代协议：表 1–6、表 8 一律报 t=2；表 7 是迭代收敛分析，报 t=0/1/2。**
+> t=1 是执行的必经步骤（每轮 prompt 来自上一轮），但**不作为任何表格的渲染层**，
+> 也不作为未跑完时的占位值 —— 缺失一律 `—`。
+>
+> 2026-08-08 重组：TDOM 从方法中移除，Ours 重新定义为纯透视多视。
+> 依据见 `docs/superpowers/specs/2026-08-08-dom-free-experiment-restructure-design.md`。
 
 ## 表 0：主实验方法配置
 
@@ -9,105 +19,188 @@
 
 执行要点：先按本表锁定每条主实验管线；后续实现和统计不得在表外共享/新增模块。
 
-| ID | Method                       | TDOM | Perspective MV | DSM projection              | Fusion unit             | Physical prior | Iterative bbox prompting | Geometry-constrained instance fusion |
-| -- | ---------------------------- | :--: | :------------: | --------------------------- | ----------------------- | :------------: | :----------------------: | :----------------------------------: |
-| M1 | SAM3-TDOM-Iter               |  ✓  |                |                             | TDOM mask refinement    |                |            ✓            |                                      |
-| M2 | SAM3-MV-PixelVote-Iter       |      |       ✓       | Standard / global           | Pixel voting            |                |            ✓            |                                      |
-| M3 | SAM3-TDOM+MV-LateFusion-Iter |  ✓  |       ✓       | Standard / global           | Pixel-level late fusion |                |            ✓            |                                      |
-| P  | **Ours**               |  ✓  |       ✓       | Per-module local projection | Instance                |       ✓       |            ✓            |                  ✓                  |
+| ID | Method                        | TDOM | Perspective MV | DSM projection              | Fusion unit          | Physical prior | Iterative bbox prompting | Geometry-constrained instance fusion |
+| -- | ----------------------------- | :--: | :------------: | --------------------------- | -------------------- | :------------: | :----------------------: | :----------------------------------: |
+| M1 | SAM3-TDOM-Iter (w/ prior)     |  ✓  |                | DOM raster                  | TDOM mask refinement |       ✓       |            ✓            |                                      |
+| M2 | SAM3-MV-PixelVote-Iter        |      |       ✓       | Standard / global           | Pixel voting         |                |            ✓            |                                      |
+| P  | **Ours**                |      |       ✓       | Per-module local projection | Instance             |       ✓       |            ✓            |                  ✓                  |
+
+**M1 是本文管线只喂单张正射**（几何先验与迭代全部保留），不是"SAM~3 直接打正射"。
+它是正射路线的**上界**，用来说明单张正射有天花板、必须上多视。
+无先验的朴素版本（`m1` 变体，t=2 F1 = 0.0562，且随迭代持续变差）只保留在逐站明细里，不进表。
+
+**已删除的两行**：原 M3 `SAM3-TDOM+MV-LateFusion-Iter`（TDOM 已不是方法的一部分），
+以及原表 6 的融合单位消融（实际生成时用的就是 M3/Ours 两行，与表 1 逐位重复）。
 
 ## 表 1：主实验总体结果
 
-执行要点：四条完整管线均运行至各自停止条件；所有可调参数按同一 protocol 固定。结果报三个站点宏平均，逐站点结果见表 2。
+执行要点：三条完整管线均运行至 t=2；所有可调参数按同一 protocol 固定。
+结果报三个站点宏平均，逐站点结果见表 2。
 
-| Method                       | Task-specific training / FT | Input                                 | Fusion paradigm                                          | Obj. Prec. ↑ | Obj. Rec. ↑ |   Obj. F1 ↑ |      AP75 ↑ | Obj. mIoU ↑ | Centroid RMSE (m) ↓ | #SAM3 calls ↓ |   Runtime ↓ |
-| ---------------------------- | :-------------------------: | ------------------------------------- | -------------------------------------------------------- | ------------: | -----------: | -----------: | -----------: | -----------: | -------------------: | -------------: | -----------: |
-| SAM3-TDOM-Iter               |            None            | TDOM                                  | Iterative single-product mask refinement                 |            — |     <br />— |           — |           — |           — |                   — |             — |           — |
-| SAM3-MV-PixelVote-Iter       |            None            | Perspective MV + DSM                  | Iterative pixel voting                                   |            — |     <br />— |           — |           — |           — |                   — |             — |           — |
-| SAM3-TDOM+MV-LateFusion-Iter |            None            | TDOM + Perspective MV + DSM           | Iterative pixel-level late fusion                        |            — |           — |           — |           — |           — |                   — |             — |           — |
-| **Ours**               |       **None**       | **TDOM + Perspective MV + DSM** | **Iterative geometry-constrained instance fusion** |  **—** | **—** | **—** | **—** | **—** |         **—** |   **—** | **—** |
+| Method                    | Task-specific training / FT | Input                   | Fusion paradigm                                    | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Centroid RMSE (m) ↓ | #SAM3 calls ↓ | Runtime ↓ |
+| ------------------------- | :-------------------------: | ----------------------- | -------------------------------------------------- | -----------: | -----: | -----: | ------: | -------: | -------------------: | -------------: | ---------: |
+| SAM3-TDOM-Iter (w/ prior) |            None            | TDOM                    | Iterative single-product mask refinement           |           — |     — |     — |      — |       — |                   — |             — |         — |
+| SAM3-MV-PixelVote-Iter    |            None            | Perspective MV + DSM    | Iterative pixel voting                             |           — |     — |     — |      — |       — |                   — |             — |         — |
+| **Ours**            |       **None**       | **Perspective MV + DSM** | **Iterative geometry-constrained instance fusion** |  **—** | **—** | **—** | **—** | **—** |         **—** |   **—** | **—** |
+
+> **表注（必须写进论文）**：M2 与 Ours 是"相同输入源、不同融合范式"的**端到端对照** ——
+> 融合单位、几何先验、逐模块局部投影三者一起变，**不是单变量消融**。
+> 单变量证据在表 3（反馈路由）、表 4（几何先验）、表 5（投影方式）。
+
+> M2 另报 `(default)` 与 `(tuned)` 两行：`min_votes=2` 是比可用阈值低一个数量级的
+> 未调默认值，三站 F1 全为 0，单独报会像稻草人。逐站调参后的配置并列给出才站得住。
 
 ## 表 2：主实验逐电站结果
 
-执行要点：直接复用表 1 的配置与固定参数；按站点分别统计，禁止为某一站点单独改 prompt、阈值或权重。
+执行要点：直接复用表 1 的配置与固定参数；按站点分别统计，
+禁止为某一站点单独改 prompt、阈值或权重。
 
-| Method                       | BeiOu Obj. F1 ↑ | XinXie Obj. F1 ↑ | CangFang Obj. F1 ↑ | Macro Avg. ↑ | Worst-site ↑ | Across-site Std. ↓ |
-| ---------------------------- | ---------------: | ----------------: | ------------------: | ------------: | ------------: | ------------------: |
-| SAM3-TDOM-Iter               |               — |                — |                  — |            — |            — |                  — |
-| SAM3-MV-PixelVote-Iter       |               — |                — |                  — |            — |            — |                  — |
-| SAM3-TDOM+MV-LateFusion-Iter |               — |                — |                  — |            — |            — |                  — |
-| **Ours**               |     **—** |      **—** |        **—** |  **—** |  **—** |        **—** |
+| Method                    | BeiOu Obj. F1 ↑ | XinXie Obj. F1 ↑ | CangFang Obj. F1 ↑ | Macro Avg. ↑ | Worst-site ↑ | Across-site Std. ↓ |
+| ------------------------- | ---------------: | ----------------: | ------------------: | ------------: | ------------: | ------------------: |
+| SAM3-TDOM-Iter (w/ prior) |               — |                — |                  — |            — |            — |                  — |
+| SAM3-MV-PixelVote-Iter    |               — |                — |                  — |            — |            — |                  — |
+| **Ours**            |     **—** |      **—** |        **—** |  **—** |  **—** |        **—** |
 
 ## 消融实验
 
-### 表 3：迭代反馈路径消融
+### 表 3：迭代反馈路由消融
 
-执行要点：所有配置均使用 TDOM 与 Perspective MV 完成第 0 轮候选生成；仅改变后续迭代中的 re-prompt 路径。比较双源反馈相对单源反馈和不反馈的增益。
+执行要点：所有配置共用同一份 t=0 候选（`iter_0/shared/infer/`），
+**只改变反馈的路由方式**。每行只比上一行多一个机制：
 
-| Configuration                       | Re-prompt TDOM | Re-prompt Perspective MV | Obj. Prec. ↑ | Obj. Rec. ↑ |   Obj. F1 ↑ |      AP75 ↑ | Obj. mIoU ↑ |   Runtime ↓ |
-| ----------------------------------- | :------------: | :----------------------: | ------------: | -----------: | -----------: | -----------: | -----------: | -----------: |
-| No iterative feedback ($t=0$)     |                |                          |            — |           — |           — |           — |           — |           — |
-| TDOM feedback only                  |       ✓       |                          |            — |           — |           — |           — |           — |           — |
-| Perspective-MV feedback only        |                |            ✓            |            — |           — |           — |           — |           — |           — |
-| **Full dual-source feedback** |       ✓       |            ✓            |  **—** | **—** | **—** | **—** | **—** | **—** |
+| # | Configuration                                    | 过物方 | prompt 经先验筛选 | 跨视角广播 | 变体              |
+| - | ------------------------------------------------ | :----: | :----------------: | :--------: | ----------------- |
+| 1 | No feedback ($t=0$)                            |       |                   |           | `full` t=0      |
+| 2 | Image-space self re-prompt                       |       |                   |           | `fb_selfimg`    |
+| 3 | Object-space, source view only                   |   ✓   |         ✓         |           | `fb_srcview`    |
+| 4 | **Object-space, all covering views (Ours)** |   ✓   |         ✓         |     ✓     | `full`          |
+
+- **1 → 2**：加"迭代 re-prompt"本身。
+- **2 → 3**：加"物方融合 + 几何先验筛选"。几何先验只有在物方才定义得出来，
+  所以 arm 2 必然没有它 —— 这是设计的性质，不是混淆。
+- **3 → 4**：加"跨视角广播"，即把融合实例重投影进**所有几何上覆盖它的影像**，
+  而不只是产生它的那一个。实测有 60–74% 的影像在 arm 3 下收不到任何 prompt。
+
+**前提（必须在表注写明）**：`inference.prompt.strict_window_prompt: false`。
+没收到 prompt 的影像照样全窗口跑推理，只是退回 text prompt，行为与 t=0 一致；
+因此三臂之间唯一的差别就是 prompt 的来源与路由，不存在"某些影像被跳过"的混淆。
+若有人把它改成 `true`，这个消融立刻失效。
+
+| Configuration                                    | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Runtime ↓ |
+| ------------------------------------------------ | -----------: | -----: | -----: | ------: | -------: | ---------: |
+| No feedback ($t=0$)                            |           — |     — |     — |      — |       — |         — |
+| Image-space self re-prompt                       |           — |     — |     — |      — |       — |         — |
+| Object-space, source view only                   |           — |     — |     — |      — |       — |         — |
+| **Object-space, all covering views (Ours)** |  **—** | **—** | **—** | **—** | **—** | **—** |
 
 ### 表 4：模块几何先验消融
 
-执行要点：保留数据源、局部投影、实例级融合和双源反馈。删除某个子评分后，对剩余评分权重重新归一化；无先验行改用 SAM~3 原始 confidence 排序和 NMS。
+执行要点：保留数据源、局部投影、实例级融合和反馈路由。删除某个子评分后，
+对剩余评分权重重新归一化；无先验行改用 SAM~3 原始 confidence 排序和 NMS。
 
-| Configuration                        | Area score | Rectangularity score | Aspect-ratio score | Obj. Prec. ↑ | Obj. Rec. ↑ |   Obj. F1 ↑ | Obj. mIoU ↑ | Over-seg. ↓ | Under-seg. ↓ |
-| ------------------------------------ | :--------: | :------------------: | :----------------: | ------------: | -----------: | -----------: | -----------: | -----------: | ------------: |
-| No module-geometry prior             |            |                      |                    |            — |           — |           — |           — |           — |            — |
-| w/o area score                       |            |          ✓          |         ✓         |            — |           — |           — |           — |           — |            — |
-| w/o rectangularity score             |     ✓     |                      |         ✓         |            — |           — |           — |           — |           — |            — |
-| w/o aspect-ratio score               |     ✓     |          ✓          |                    |            — |           — |           — |           — |           — |            — |
-| **Full module-geometry prior** |     ✓     |          ✓          |         ✓         |  **—** | **—** | **—** | **—** | **—** |  **—** |
+累积式（而非仅留一法）呈现：子评分对主要失效模式是冗余的 —— 半个模块的碎片
+面积只有一半、长宽比也从 2.0 变成 1.0，`w_area` 与 `w_ratio` 各自都能拦住它，
+所以删掉任何一个都几乎不动分。逐个加上去才看得出增益来自哪里。
+**读 AP95 / AJI / 过分割率，不要读 RQ** —— 面积项一加入 RQ 就饱和了。
 
-### 表 5：输入数据源消融
+| Configuration                        | Area score | Rectangularity score | Aspect-ratio score | RQ (=F1) ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Obj. mIoU ↑ | Over-seg. ↓ | Under-seg. ↓ |
+| ------------------------------------ | :--------: | :------------------: | :----------------: | -----------: | -----: | ------: | -------: | -----------: | -----------: | ------------: |
+| No module-geometry prior             |            |                      |                    |           — |     — |      — |       — |           — |           — |            — |
+| *— 累积，先加矩形度 —*            |            |                      |                    |              |       |        |         |             |             |              |
+| + rectangularity                     |            |          ✓          |                    |           — |     — |      — |       — |           — |           — |            — |
+| + area + rectangularity              |     ✓     |          ✓          |                    |           — |     — |      — |       — |           — |           — |            — |
+| *— 累积，先加面积 —*              |            |                      |                    |              |       |        |         |             |             |              |
+| + area                               |     ✓     |                      |                    |           — |     — |      — |       — |           — |           — |            — |
+| + area + rectangularity              |     ✓     |          ✓          |                    |           — |     — |      — |       — |           — |           — |            — |
+| *— 从完整先验中仅留一 —*          |            |                      |                    |              |       |        |         |             |             |              |
+| w/o area                             |            |          ✓          |         ✓         |           — |     — |      — |       — |           — |           — |            — |
+| w/o rectangularity                   |     ✓     |                      |         ✓         |           — |     — |      — |       — |           — |           — |            — |
+| w/o aspect ratio                     |     ✓     |          ✓          |                    |           — |     — |      — |       — |           — |           — |            — |
+| **Full prior (all three)**     |     ✓     |          ✓          |         ✓         |  **—** | **—** | **—** | **—** | **—** | **—** |  **—** |
 
-执行要点：只删除对应输入流，其余可适用模块保持 Full 设置。`w/o perspective MV` 与主实验 TDOM baseline 不同：它仍保留本文的模块几何先验和反馈逻辑。
+> `+ area + rectangularity` 不需要单独跑：三个子评分里保留面积与矩形度，
+> 就是 `w_ratio=0`，即 `abl_no_ratio`。因此它在两个累积序列里是同一个变体。
 
-| Configuration                    | TDOM | Perspective MV | Obj. Prec. ↑ | Obj. Rec. ↑ |   Obj. F1 ↑ |      AP75 ↑ | Obj. mIoU ↑ | Centroid RMSE (m) ↓ |   Runtime ↓ |
-| -------------------------------- | :--: | :------------: | ------------: | -----------: | -----------: | -----------: | -----------: | -------------------: | -----------: |
-| Ours w/o perspective MV          |  ✓  |                |            — |           — |           — |           — |           — |                   — |           — |
-| Ours w/o TDOM                    |      |       ✓       |            — |           — |           — |           — |           — |                   — |           — |
-| **Full dual-source input** |  ✓  |       ✓       |  **—** | **—** | **—** | **—** | **—** |         **—** | **—** |
+### 表 5：投影方式消融
 
-### 表 6：融合单位消融
+执行要点：三种投影方式**代码均已就绪**，只改一个 config key
+`projection.oblique.method`，其余设置完全固定。
+`auto`（先试仿射，控制点不足退回共线方程）不进表 —— 它是两者的混合，作消融行没有意义。
 
-执行要点：保留相同候选、局部投影、模块几何先验和双源反馈；仅把物方融合输出从栅格投票/连通域替换为候选实例关联/NMS。
+投影方式直接决定物方定位精度，因此**必须报 Centroid RMSE**，它是这张表的关键区分列。
 
-| Fusion representation                    | Candidate filtering / score          | Object-space output                         | Obj. Prec. ↑ | Obj. Rec. ↑ |   Obj. F1 ↑ |      AP75 ↑ | Obj. mIoU ↑ | Over-seg. ↓ | Under-seg. ↓ |   Runtime ↓ |
-| ---------------------------------------- | ------------------------------------ | ------------------------------------------- | ------------: | -----------: | -----------: | -----------: | -----------: | -----------: | ------------: | -----------: |
-| Pixel-level score-weighted fusion        | Full module-geometry prior           | Raster vote + connected components          |            — |           — |           — |           — |           — |           — |            — |           — |
-| **Instance-level geometry fusion** | **Full module-geometry prior** | **Candidate-level association / NMS** |  **—** | **—** | **—** | **—** | **—** | **—** |  **—** | **—** |
+| Projection method                   | 机制                                                | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Centroid RMSE (m) ↓ | Runtime ↓ |
+| ----------------------------------- | --------------------------------------------------- | -----------: | -----: | -----: | ------: | -------: | -------------------: | ---------: |
+| Collinearity (direct)               | 共线方程逐点直接投影，地面高程由射线-DSM 求交给出    |           — |     — |     — |      — |       — |                   — |         — |
+| Affine (control-point)              | 由控制点对拟合仿射变换，整体映射像方多边形           |           — |     — |     — |      — |       — |                   — |         — |
+| **Slope correction (ours)**   | 逐模块采样 → RANSAC 拟合局部平面 → 射线-平面求交  |  **—** | **—** | **—** | **—** | **—** |         **—** | **—** |
+
+> **仿射行的必读表注**：强制 `method: affine` 时，控制点少于 3 个的要素无法确定
+> 仿射解，会被打上 `affine_failed` 并在下游丢弃（见
+> `tests/test_projection.py::test_forced_affine_without_enough_control_points_is_tagged_failed`）。
+> 因此该行的召回损失里有一部分**不是投影不准，而是要素根本没进入输出**。
+> 跑批时强制统计 `affine_failed` 的要素数，在表注里给出丢弃比例，
+> 否则这一行会看起来莫名其妙地差而读者看不到原因。
+>
+> **不为仿射单独调参**：跑出什么记录什么。为了让它"好看"而单独调阈值
+> 会破坏三种投影方式的可比性。
 
 ## 多视分析
 
-### 表 7：镜头方向增量分析
+### 表 6：镜头方向增量分析
 
-执行要点：TDOM 始终保留；下视镜头固定先加入；四个倾斜镜头按固定随机种子生成的顺序逐一加入。每个镜头方向对应的全部有效影像共同参与推理，其他设置固定。
+执行要点：下视镜头固定先加入，四个倾斜镜头按固定随机种子（seed=42）生成的顺序
+逐一加入。每个镜头方向对应的全部有效影像共同参与推理，其他设置固定。
 
-| Raw-view set                     | Nadir | # Oblique directions | Obj. Prec. ↑ | Obj. Rec. ↑ | Obj. F1 ↑ | AP75 ↑ | Obj. mIoU ↑ | #SAM3 calls | Runtime ↓ |
-| -------------------------------- | :---: | -------------------: | ------------: | -----------: | ---------: | ------: | -----------: | ----------: | ---------: |
-| TDOM only                        |      |                    0 |            — |           — |         — |      — |           — |          — |         — |
-| TDOM + Nadir                     |  ✓  |                    0 |            — |           — |         — |      — |           — |          — |         — |
-| TDOM + Nadir + O1                |  ✓  |                    1 |            — |           — |         — |      — |           — |          — |         — |
-| TDOM + Nadir + O1 + O2           |  ✓  |                    2 |            — |           — |         — |      — |           — |          — |         — |
-| TDOM + Nadir + O1 + O2 + O3      |  ✓  |                    3 |            — |           — |         — |      — |           — |          — |         — |
-| TDOM + Nadir + O1 + O2 + O3 + O4 |  ✓  |                    4 |            — |           — |         — |      — |           — |          — |         — |
+**这些跑批不含 TDOM。** 原先的行标签写作 `TDOM + Nadir + …` 是错的：
+`d5_o4` 与 `full` 在 t=0 的逐站结果完全一致（BeiOu 均为 1772 个预测 /
+Area IoU 0.9711 / F1 1.0000），说明 `dirs/` 下从来就没有并入过正射。
+第一行保留为 0 个透视视角的锚点，但它走的是 DOM 栅格管线，
+**不是这条曲线上的点**，表注需说明。
+
+| Raw-view set                     | Nadir | # Oblique directions | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ |
+| -------------------------------- | :---: | -------------------: | -----------: | -----: | -----: | ------: | -------: |
+| TDOM only (no perspective views) |      |                    0 |           — |     — |     — |      — |       — |
+| Nadir only                       |  ✓  |                    0 |           — |     — |     — |      — |       — |
+| Nadir + O1                       |  ✓  |                    1 |           — |     — |     — |      — |       — |
+| Nadir + O1 + O2                  |  ✓  |                    2 |           — |     — |     — |      — |       — |
+| Nadir + O1 + O2 + O3             |  ✓  |                    3 |           — |     — |     — |      — |       — |
+| Nadir + O1 + O2 + O3 + O4        |  ✓  |                    4 |           — |     — |     — |      — |       — |
 
 ## 迭代分析
 
-### 表 8：迭代收敛分析
+### 表 7：迭代收敛分析
 
-执行要点：仅运行 Full method，记录每轮完整闭环后的输出。提前收敛的站点在后续轮次沿用最终输出，以计算跨站点宏平均；同时累计 SAM~3 调用量和耗时。
+执行要点：仅运行 Full method，记录每轮完整闭环后的输出，并累计 SAM~3 调用量与耗时。
+**这是唯一报多个迭代层的表。**
 
-|                                            Iteration$t$ | #Pred. | TP | FP | FN | Obj. Prec. ↑ | Obj. Rec. ↑ | Obj. F1 ↑ | AP75 ↑ | Obj. mIoU ↑ | Cumulative#SAM3 calls | Cumulative runtime ↓ |
-| --------------------------------------------------------: | -----: | -: | -: | -: | ------------: | -----------: | ---------: | ------: | -----------: | --------------------: | --------------------: |
-| 0: text-prompt initialization + first object-space fusion |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
-|                                                         1 |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
-|                                                         2 |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
-|                                                         3 |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
-|                                                $\cdots$ |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
-|                                                 Converged |     — | — | — | — |            — |           — |         — |      — |           — |                    — |                    — |
+**收敛判据**：`|ΔF1| < 0.005` **且** `|Δ#pred| / #pred < 0.01`。
+若 t=2 仍未满足，末行须如实标注为"未收敛（截断于 t=2）"，不得写成 Converged。
+
+| Iteration $t$                                           | #Pred. | TP | FP | FN | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Cumulative #SAM3 calls | Cumulative runtime ↓ |
+| ---------------------------------------------------------: | -----: | -: | -: | -: | -----------: | -----: | -----: | ------: | -------: | ---------------------: | --------------------: |
+| 0: text-prompt initialization + first object-space fusion |     — | — | — | — |           — |     — |     — |      — |       — |                     — |                    — |
+| 1                                                          |     — | — | — | — |           — |     — |     — |      — |       — |                     — |                    — |
+| 2                                                          |     — | — | — | — |           — |     — |     — |      — |       — |                     — |                    — |
+
+## 附加分析
+
+### 表 8：正射路径为何是死路
+
+执行要点：按 TDOM 在管线中出现的位置排列，全部复用已有跑批
+（含已弃用的双源管线 `ours`）。这张表回答审稿人必然会问的
+"你手上有正射，为什么不用" —— 用测量回答，而不是断言。
+
+| Role of TDOM                          | 变体             | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Runtime ↓ |
+| ------------------------------------- | ---------------- | -----------: | -----: | -----: | ------: | -------: | ---------: |
+| TDOM as the sole input                | `dom`          |           — |     — |     — |      — |       — |         — |
+| TDOM as a feedback source only        | `fb_tdom_only` |           — |     — |     — |      — |       — |         — |
+| TDOM as input + feedback (dual-source) | `ours`         |           — |     — |     — |      — |       — |         — |
+| **TDOM unused (Ours)**          | `full`         |  **—** | **—** | **—** | **—** | **—** | **—** |
+
+> **必须如实报告的代价**：去掉 TDOM 后 AP95 从 0.9675 降到 0.9589（−0.0086），
+> 且几乎全部来自 XinXie（0.9636 → 0.9421）；BeiOu 上反而更高（0.9896 → 0.9901）。
+> 按本文口径"F1 在 IoU 0.50–0.90 完全饱和，AP95 是唯一有区分度的指标"，
+> 不能只报 F1 就宣布去掉 TDOM 没有代价。
+> 建议表述：以 −0.009 的 AP95 换取 +0.003 F1、+0.005 AJI、一整条数据支路的移除
+> 和更低的运行成本。
