@@ -403,12 +403,43 @@ pipeline.run_inference=true  run_projection=true  run_postprocess=false
 
 ### S6 — 评估
 
-`scripts/eval_0518_batch.py` 是**发现式**的：扫 `iter_*/full/`、`iter_*/dirs/*/` 及历史的 `views/view_*/`，
-缺的自动跳过。所以 **任何时候都能跑，跑完多少算多少**。
+`scripts/eval_0518_batch.py` 是**发现式**的：扫 `iter_*/full/`、`iter_*/dirs/*/`、
+`<method>/iter_*/` 及历史的 `views/view_*/`，缺的自动跳过。所以 **任何时候都能跑，
+跑完多少算多少**；新变体（`fb_*` / `proj_*`）只要落在 `<method>/iter_{t}/final.shp`
+就会被自动发现，不用改评估脚本。
 
-### S7 — 汇总出表
+> **必须显式给 `--pattern` 和 `--out-root`。** 默认值是 `--pattern '*-exp'` +
+> `--out-root <zs-root>/eval_0518`，**匹配不到当前的 `-exp2` 树** —— 用默认参数跑
+> 会去评旧的 `-exp` 实验并写进另一个目录，全程不报错，看起来成功但评的是另一批数据。
+> 当前这一轮的正确调用是：
+>
+> ```bash
+> python scripts/eval_0518_batch.py \
+>     --pattern '*-exp2' --out-root /data/dataset/PV/ZS_PV/eval_exp2
+> python scripts/collect_run_stats.py    # 刷新 run_stats.csv 的成本列
+> ```
 
-从 `all_stations_summary.csv` + `logs/pipeline_summary_*.json` 生成表 1–8 的 Markdown。
+### S7 — 汇总出表（出完必须校验）
+
+从 `all_stations_summary.csv` + `run_stats.csv` 生成表 1–8 的 Markdown：
+
+```bash
+python scripts/make_tables.py                        > experiments_results.md
+python scripts/make_tables.py --stations 001-BeiOu   > experiments_results_beiou.md
+python scripts/make_tables.py --stations 003-XinXie  > experiments_results_xinxie.md
+python scripts/make_tables.py --stations 004-CangFang > experiments_results_cangfang.md
+
+# 逐字符校验：从 CSV 独立重算每个单元格，不复用 make_tables 的聚合函数
+python scripts/check_tables.py experiments_results.md
+python scripts/check_tables.py experiments_results_beiou.md    --stations 001-BeiOu
+python scripts/check_tables.py experiments_results_xinxie.md   --stations 003-XinXie
+python scripts/check_tables.py experiments_results_cangfang.md --stations 004-CangFang
+```
+
+**校验不通过就不要用那份表。** 校验器会同时抓到数值错和行数/变体映射错
+（负向测试验证过：改一个数值、删一行都会被报出来）。它唯一抓不到的是
+"`make_tables` 与 `check_tables` 两处声明犯同一个错"，所以两边的行→变体映射
+是刻意分别写的，不是互相 import。
 
 ---
 
