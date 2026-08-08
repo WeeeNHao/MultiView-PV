@@ -19,8 +19,8 @@ Variant -> table row mapping (see the DOM-free restructure design doc):
     proj_affine   affine projection                     table 5
     d1..d5        cumulative camera-direction sets      table 6
     abl_*         module-geometry prior ablation        table 4
-    fb_tdom_only  TDOM-only re-prompting                table 8
     ours          the abandoned dual-source pipeline    table 8 only
+    fb_tdom_only  TDOM-only re-prompting                no table (see table8)
 
 `ours` and `m1`/`m3` are deliberately absent from the main tables: TDOM was
 dropped from the method. At t=2 the perspective-only run beats the dual-source
@@ -485,10 +485,15 @@ def table8(r: Results, last: int) -> str:
     Reuses runs that already exist, including the abandoned dual-source `ours`.
     Keeping them answers the obvious reviewer question -- you had an orthophoto,
     why not use it -- with measurements rather than assertion.
+
+    `fb_tdom_only` (TDOM as a feedback source into the perspective pipeline) is
+    deliberately absent. It only ever reached t=1, and finishing it was the one
+    TDOM-x-MV hybrid left anywhere in the run plan -- five hours of GPU spent
+    re-mixing the two branches this restructure exists to separate. The three
+    remaining rows already carry the argument, and all three are already run.
     """
     configs = [
         ("TDOM as the sole input", "dom"),
-        ("TDOM as a feedback source only", "fb_tdom_only"),
         ("TDOM as input + feedback (dual-source)", "ours"),
         ("**TDOM unused (Ours)**", "full"),
     ]

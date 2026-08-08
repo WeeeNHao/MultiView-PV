@@ -77,8 +77,7 @@ def table_spec(last: int) -> List[Tuple[str, List[Optional[Tuple[str, int]]]]]:
         ("表 6", [("dom", last), ("d1_nadir", last), ("d2_o1", last),
                   ("d3_o2", last), ("d4_o3", last), ("d5_o4", last)]),
         ("表 7", [("full", t) for t in range(last + 1)]),
-        ("表 8", [("dom", last), ("fb_tdom_only", last),
-                  ("ours", last), ("full", last)]),
+        ("表 8", [("dom", last), ("ours", last), ("full", last)]),
     ]
 
 

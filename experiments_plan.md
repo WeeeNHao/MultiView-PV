@@ -45,7 +45,7 @@
 | 表 5 | 投影方式               | ⏳ 缺 2 个变体    | 改`projection.oblique.method` 即可，代码已就绪；t=0 可复用 `infer/` 纯 CPU 重投影，t=1/t=2 需推理 |
 | 表 6 | 镜头方向增量           | ⏳ 缺 t=2         | `d1..d5` 已有 t=0/1，需各补一轮（子集，非全量）                |
 | 表 7 | 迭代收敛               | ✅ 已跑完         | —                                                               |
-| 表 8 | 正射路径分析           | ⏳ 缺 t=2         | `fb_tdom_only` 只有 t=1，需补一轮；其余三行现成                |
+| 表 8 | 正射路径分析           | ✅ 已跑完         | 三行（`dom` / `ours` / `full`）全部现成，零新增跑批            |
 
 **指标侧缺口**（`scripts/eval_0518_batch.py` 的 `SUMMARY_FIELDS` 里没有）：
 `Centroid RMSE`、`#SAM3 calls`、`Runtime`、`Over-seg.`、`Under-seg.`。
@@ -368,17 +368,20 @@ pipeline.run_inference=true  run_projection=true  run_postprocess=false
 | `SPJ`  | `collinearity` / `affine` 各跑 t=0（复用 `infer/`，纯 CPU）+ t=1、t=2 | `proj_collin`、`proj_affine` |
 | `S5X`  | `abl_*` ×6 从 t=1 续跑 t=2                                          | `abl_*`                       |
 | `S4X`  | `d1_nadir`..`d5_o4` 从 t=1 续跑 t=2                                 | `d*`                          |
-| `SDX`  | `fb_tdom_only` 从 t=1 续跑 t=2                                      | `fb_tdom_only`                |
 
-**跑批量**：15 全量轮 + 5 子集轮 + 2 次纯 CPU 投影。按 §1.3 实测单图均摊：
+> **没有 `fb_tdom_only` 的续跑 stage。** 补完它是整个计划里唯一剩下的
+> TDOM×多视混合配置，与"把 TDOM 完全从多视中隔离出去"直接冲突。表 8 因此
+> 收敛为三行，全部现成。**跑批计划里不再有任何配置同时用到 TDOM 与透视多视。**
 
-| 电站         | 影像 | rank | s/img       | 15 全量轮 | 5 子集轮 |     小计 |
+**跑批量**：14 全量轮 + 5 子集轮 + 2 次纯 CPU 投影。按 §1.3 实测单图均摊：
+
+| 电站         | 影像 | rank | s/img       | 14 全量轮 | 5 子集轮 |     小计 |
 | ------------ | ---: | ---: | ----------- | --------: | -------: | -------: |
-| 001-BeiOu    |  328 |    2 | 13.7（实测） |    18.7 h |    3.4 h | **22.1 h** |
-| 003-XinXie   |  383 |    2 | ~14（外推）  |    22.3 h |    4.6 h | **26.9 h** |
-| 004-CangFang | 1454 |    4 | 12.0（实测） |    72.7 h |   15.1 h | **87.8 h** |
+| 001-BeiOu    |  328 |    2 | 13.7（实测） |    17.5 h |    3.4 h | **20.9 h** |
+| 003-XinXie   |  383 |    2 | ~14（外推）  |    20.9 h |    4.6 h | **25.5 h** |
+| 004-CangFang | 1454 |    4 | 12.0（实测） |    67.9 h |   15.1 h | **83.0 h** |
 
-三站并行 → 关键路径 CangFang ≈ 3.7 天。BeiOu/XinXie 约 1 天后腾出 GPU0/1，
+三站并行 → 关键路径 CangFang ≈ 3.5 天。BeiOu/XinXie 约 1 天后腾出 GPU0/1，
 `abl_*` 与 `proj_*` 各轮彼此独立、可迁移过去分担，实际预期 **2.5–3 天**。
 
 **`fb_selfimg` 的强制核对**：`infer/` 的文件名是 `images_<IMG>__r0.shp`，

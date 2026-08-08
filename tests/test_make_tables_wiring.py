@@ -208,9 +208,20 @@ def test_runtime_is_missing_when_the_reported_iteration_was_never_reached():
 
 
 def test_table8_orders_the_tdom_roles_from_sole_input_to_unused():
-    r = _results({("dom", 2): 0.11, ("fb_tdom_only", 2): 0.22,
-                  ("ours", 2): 0.33, ("full", 2): 0.44})
+    r = _results({("dom", 2): 0.11, ("ours", 2): 0.33, ("full", 2): 0.44})
 
     cells = _cells(table8(r, 2))
 
-    assert [c[RQ] for c in cells.values()] == ["0.1100", "0.2200", "0.3300", "0.4400"]
+    assert [c[RQ] for c in cells.values()] == ["0.1100", "0.3300", "0.4400"]
+
+
+def test_table8_excludes_the_tdom_into_mv_feedback_row():
+    """`fb_tdom_only` was the last TDOM-into-multi-view hybrid in the run plan.
+
+    Isolating the two branches means nothing left to run mixes them; the three
+    remaining rows carry the argument and are all already computed.
+    """
+    r = _results({("dom", 2): 0.11, ("fb_tdom_only", 2): 0.22,
+                  ("ours", 2): 0.33, ("full", 2): 0.44})
+
+    assert "0.2200" not in table8(r, 2)

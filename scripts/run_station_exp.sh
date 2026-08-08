@@ -856,12 +856,22 @@ stage_S5() {
     log "S5 done for '${S5_CONFIGS}' (table 4; Full-prior row is ours/iter_1)"
 }
 
-# ------------------------------------- S6 table 3: TDOM-only feedback path
-# Row 2 of table 3, the only one the suite never ran. The t=0 candidate set is
-# dual-source (identical to Ours t=0, which is why the SD baseline and the
-# shared cache are reused verbatim); the difference is what gets re-prompted
-# afterwards: TDOM is re-inferred from its own prompts, the perspective side is
-# NOT, so the fusion at t=1 sees refreshed TDOM against unchanged MV evidence.
+# ------------------------------------- S6 TDOM-only feedback path (RETIRED)
+#
+# RETIRED 2026-08-08: no table quotes this variant any more, and it is not part
+# of the run plan. It re-prompts TDOM from a dual-source t=0, which makes it the
+# last configuration anywhere that mixes the TDOM and perspective branches --
+# exactly the coupling the DOM-free restructure exists to remove. Table 8 keeps
+# `dom`, `ours` and `full`, all of which are already computed.
+#
+# Kept, not deleted, so the fb_tdom_only t=1 result already on disk stays
+# reproducible. Do not run it as part of the current suite.
+#
+# The t=0 candidate set is dual-source (identical to Ours t=0, which is why the
+# SD baseline and the shared cache are reused verbatim); the difference is what
+# gets re-prompted afterwards: TDOM is re-inferred from its own prompts, the
+# perspective side is NOT, so the fusion at t=1 sees refreshed TDOM against
+# unchanged MV evidence.
 stage_S6() {
     local root="${OUT_ROOT}/fb_tdom_only"
     local dom_image="${DATA_ROOT}dom/DOM.tif"

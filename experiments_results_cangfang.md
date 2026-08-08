@@ -90,7 +90,6 @@
 | Role of TDOM | RQ (=F1) ↑ | SQ ↑ | PQ ↑ | AJI ↑ | AP95 ↑ | Area IoU ↑ | Area Dice ↑ | Area Prec. ↑ | Area Rec. ↑ | Runtime (min) ↓ |
 |---|---|---|---|---|---|---|---|---|---|---|
 | TDOM as the sole input | 0.4820 | 0.9731 | 0.4691 | 0.3096 | 0.3062 | 0.3096 | 0.4728 | 0.9953 | 0.3100 | 278.4 |
-| TDOM as a feedback source only | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | TDOM as input + feedback (dual-source) | 0.9999 | 0.9721 | 0.9719 | 0.9718 | 0.9494 | 0.9718 | 0.9857 | 0.9876 | 0.9837 | 974.6 |
 | **TDOM unused (Ours)** | 0.9999 | 0.9719 | 0.9718 | 0.9716 | 0.9445 | 0.9716 | 0.9856 | 0.9875 | 0.9837 | 880.8 |
 
@@ -169,4 +168,3 @@
 > - 004-CangFang t=2 d3_o2
 > - 004-CangFang t=2 d4_o3
 > - 004-CangFang t=2 d5_o4
-> - 004-CangFang t=2 fb_tdom_only
