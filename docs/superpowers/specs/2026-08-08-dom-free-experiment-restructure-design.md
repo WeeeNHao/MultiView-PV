@@ -332,8 +332,10 @@
 | `SFB1` | 导出 `include_intersections=false` 的 prompts → 跑 t=1、t=2 | `fb_srcview` |
 | `SFB2` | 导出 `mode=self_image` 的 prompts → 跑 t=1、t=2（每轮重新从上一轮 `infer/` 导出） | `fb_selfimg` |
 | `SPJ` | 对 `collinearity` / `affine` 各跑 t=0（复用 `infer/`，纯 CPU 投影）+ t=1、t=2 | `proj_collin`、`proj_affine` |
-| `S5X` | `abl_*` ×6 从 t=1 续跑 t=2 | `abl_*` |
-| `S4X` | `d1_nadir`..`d5_o4` 从 t=1 续跑 t=2 | `d*` |
+
+表 4 与表 6 的 t=2 **不新增 stage**：`_reprojection_variant`（S5 用）与 `S7` 的循环上界原先硬编码为 `t<=1`，改为 `ITER_MAX` 后重跑 `S5` / `S7` 即靠 `SKIP_EXISTING` 续上 t=2。平行的 `S5X`/`S4X` 会复制一份 prompt 链逻辑，迟早漂移。
+
+> 顺带修掉一个只在 t≥2 才暴露的缺陷：`_reprojection_variant` 的 prompt 源原先硬编码为 `iter_0/prompts`。循环停在 t=1 时无害，跑到 t=2 就会每轮重放 t=0 的 prompt，呈现出一个从未发生过的“收敛”。现已按 `iter_$((t-1))/prompts` 逐轮链接。
 
 全部遵守既有约定：产物落固定路径、`SKIP_EXISTING=1` 可断点续跑、`tee` 到 `${OUT}/_logs/{stage}.log`、通过 `scripts/tmux_launch.sh` 起 session。
 

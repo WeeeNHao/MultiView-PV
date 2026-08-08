@@ -366,8 +366,15 @@ pipeline.run_inference=true  run_projection=true  run_postprocess=false
 | `SFB1` | 导出 `include_intersections=false` 的 prompts → 跑 t=1、t=2         | `fb_srcview`                  |
 | `SFB2` | 导出 `mode=self_image` 的 prompts → 跑 t=1、t=2（每轮重新从上一轮 `infer/` 导出） | `fb_selfimg`     |
 | `SPJ`  | `collinearity` / `affine` 各跑 t=0（复用 `infer/`，纯 CPU）+ t=1、t=2 | `proj_collin`、`proj_affine` |
-| `S5X`  | `abl_*` ×6 从 t=1 续跑 t=2                                          | `abl_*`                       |
-| `S4X`  | `d1_nadir`..`d5_o4` 从 t=1 续跑 t=2                                 | `d*`                          |
+
+表 4 与表 6 的 t=2 **不新增 stage**：`_reprojection_variant`（S5 用）与 `S7` 的循环
+上界原先是硬编码的 `t<=1`，已改为 `ITER_MAX`，重跑 `S5` / `S7` 即靠 `SKIP_EXISTING`
+续上 t=2。写平行的 `S5X`/`S4X` 会复制一份 prompt 链逻辑，迟早与本体漂移。
+
+> 顺带修了一个只在 t≥2 才会暴露的缺陷：`_reprojection_variant` 的 prompt 源
+> 原先硬编码为 `iter_0/prompts`。循环停在 t=1 时无害，但一旦跑到 t=2，
+> 每一轮都会重放 t=0 的 prompt —— 结果会呈现出一个从未发生过的"收敛"。
+> 现在按 `iter_$((t-1))/prompts` 逐轮链接。
 
 > **没有 `fb_tdom_only` 的续跑 stage。** 补完它是整个计划里唯一剩下的
 > TDOM×多视混合配置，与"把 TDOM 完全从多视中隔离出去"直接冲突。表 8 因此

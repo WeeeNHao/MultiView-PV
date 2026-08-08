@@ -11,6 +11,7 @@ from shapely.geometry import Polygon
 from tqdm import tqdm
 
 from io_flow.input_resolver import resolve_image_paths
+from postprocess.nms import nms_features
 from projection.collinearity import (
     build_rotation,
     geo_to_image_xy,
@@ -519,30 +520,55 @@ def _pixel_bboxes_from_shp(
     shp_path: str,
     min_size: float,
     min_confidence: float,
+    nms_iou: float,
 ) -> List[List[float]]:
-    """Envelopes of one image's masks, already in that image's pixel frame."""
+    """Envelopes of one image's masks, in that image's pixel frame, deduplicated.
+
+    The per-image files hold *raw* sliding-window detections. At 0.5 window
+    overlap the same module is found several times over -- 1060 boxes survive
+    the size filter on a BeiOu image that contains about 311 distinct modules --
+    so they go through the same NMS the pipeline runs before fusing.
+
+    Without it a single module contributes several near-identical prompts and
+    `max_prompt_per_window` spends its budget of five re-prompting one module
+    instead of covering five. The ablation arm would then be losing to prompt
+    redundancy rather than to the missing object-space round trip. NMS is an
+    image-space operation, so this brings in neither object space nor the
+    geometry prior -- the two things the arm is defined by not having.
+    """
     ds = ogr.Open(shp_path)
     if ds is None:
         raise FileNotFoundError(f"Cannot open {shp_path}")
     layer = ds.GetLayer()
     has_con = layer.GetLayerDefn().GetFieldIndex("con") != -1
 
-    boxes: List[List[float]] = []
+    candidates: List[Dict[str, Any]] = []
     for feat in layer:
         geom = feat.GetGeometryRef()
         if geom is None:
             continue
+        score = 1.0
         if has_con:
             try:
-                if float(feat.GetFieldAsString("con")) < min_confidence:
-                    continue
+                score = float(feat.GetFieldAsString("con"))
             except ValueError:
-                pass
+                score = 1.0
+            if score < min_confidence:
+                continue
         min_x, max_x, min_y, max_y = geom.GetEnvelope()
         if (max_x - min_x) < min_size or (max_y - min_y) < min_size:
             continue
-        boxes.append([min_x, min_y, max_x, max_y])
-    return boxes
+        candidates.append({"bbox": [min_x, min_y, max_x, max_y],
+                           "con_weight": score})
+
+    if nms_iou > 0 and len(candidates) > 1:
+        candidates = nms_features(
+            candidates,
+            score_field="con_weight",
+            iou_threshold=nms_iou,
+            use_geometry_iou=False,
+        )
+    return [list(c["bbox"]) for c in candidates]
 
 
 def _export_self_image_prompts(cfg: Dict[str, Any], prompt_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -578,6 +604,9 @@ def _export_self_image_prompts(cfg: Dict[str, Any], prompt_cfg: Dict[str, Any]) 
 
     min_size = float(prompt_cfg.get("min_size", 50.0))
     min_confidence = float(prompt_cfg.get("min_confidence", 0.5))
+    # Same threshold as postprocess.per_image_nms in the station configs, so
+    # this arm dedupes exactly as much as every other path does.
+    nms_iou = float(prompt_cfg.get("nms_iou_threshold", 0.25))
 
     by_key: Dict[str, str] = {}
     for entry in sorted(os.listdir(raw_dir)):
@@ -604,6 +633,7 @@ def _export_self_image_prompts(cfg: Dict[str, Any], prompt_cfg: Dict[str, Any]) 
             shp_path=shp_path,
             min_size=min_size,
             min_confidence=min_confidence,
+            nms_iou=nms_iou,
         )
         if not boxes:
             continue

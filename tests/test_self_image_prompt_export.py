@@ -107,6 +107,34 @@ def test_exported_box_is_the_polygon_pixel_envelope(tmp_path):
     assert _boxes(out) == [[100.0, 200.0, 400.0, 500.0]]
 
 
+def test_overlapping_detections_are_deduplicated_before_export(tmp_path):
+    """`infer/` holds raw sliding-window detections, not deduplicated ones.
+
+    At 0.5 window overlap a module is detected several times over, so exporting
+    everything gives ~675 boxes per image on BeiOu against ~146 for the
+    object-space path -- and `max_prompt_per_window` would then spend its budget
+    of five on near-copies of one module instead of five different ones. Arm 2
+    would lose to prompt redundancy rather than to the missing object-space
+    round trip, which is not what the ablation claims to measure.
+
+    The pipeline's own per-image NMS is the right dedup: it is an image-space
+    operation, so applying it here smuggles in neither object space nor the
+    geometry prior -- it just stops the arm being crippled for the wrong reason.
+    """
+    cfg, prompt_cfg, out = _build(tmp_path, {SHP: [
+        (100, 200, 400, 500, 0.9),     # kept: highest score of its cluster
+        (105, 205, 405, 505, 0.7),     # near-duplicate from the next window
+        (900, 900, 1200, 1200, 0.8),   # a genuinely different module
+    ]})
+
+    _export_self_image_prompts(cfg=cfg, prompt_cfg=prompt_cfg)
+
+    boxes = _boxes(out)
+    assert len(boxes) == 2
+    assert [100.0, 200.0, 400.0, 500.0] in boxes
+    assert [900.0, 900.0, 1200.0, 1200.0] in boxes
+
+
 def test_features_below_min_confidence_are_not_exported(tmp_path):
     cfg, prompt_cfg, out = _build(tmp_path, {SHP: [
         (100, 200, 400, 500, 0.9),

@@ -16,17 +16,29 @@
 #             SP  P   Ours, dual-source feedback      (table 1/2, table 3 Full)
 #             S2  iter_0 postprocess | S3 iterate t=1..N -- perspective-only,
 #                 supplies table 3 "MV feedback only" and table 5 "w/o TDOM"
-#             S4  camera-direction sets at t=0          (table 7)
-#             S5  module-geometry prior ablation, t=1   (table 4)
-#             S6  TDOM-only feedback path, t=1          (table 3 row 2)
-#             S7  camera-direction sets at t=1          (table 7, feedback round)
+#             S4  camera-direction sets at t=0          (table 6)
+#             S5  module-geometry prior ablation        (table 4)
+#             S6  TDOM-only feedback path -- RETIRED, in no table
+#             S7  camera-direction sets, t=1..ITER_MAX  (table 6, feedback rounds)
+#             SFB1 fb_srcview: object-space feedback,   (table 3 arm 3)
+#                  no cross-view broadcast
+#             SFB2 fb_selfimg: image-space self         (table 3 arm 2)
+#                  re-prompting, no object space
+#             SPJ  projection-method ablation           (table 5)
 #
 #   Dependencies:
 #     S1 (+S1R) -> S2 -> S3 ;  S1 -> S4 -> S7 ;  S1 -> SM2/SM3 ;
-#     SD -> SP -> S6 ;  SM1 -> SM3 ;  S1 -> S5
+#     SD -> SP ;  SM1 -> SM3 ;  S1 -> S5 ;  S1 -> SPJ ;  S2 -> SFB1/SFB2
 #
 #   Prior: only SD/SP/S2/S3/S4 carry the module-geometry prior. SM1/SM2/SM3 are
 #   baselines and run with NO_PRIOR_OPTS + GLOBAL_PROJ_OPTS per draft table 0.
+#
+#   Protocol (2026-08-08): every table reports t=ITER_MAX except the convergence
+#   one. S5 and S7 therefore iterate to ITER_MAX like everything else; they used
+#   to stop at t=1. t=1 is an execution step, never a reporting level.
+#
+#   TDOM and perspective multi-view are fully separated: no stage in the current
+#   plan uses both. S6 is the last one that did and is retired.
 #
 # Every stage is idempotent: with SKIP_EXISTING=1 (default) an existing final
 # shapefile makes the stage a no-op, so Ctrl-C and re-run resumes in place.
@@ -102,7 +114,9 @@ PIXEL_MIN_AREA="${PIXEL_MIN_AREA:-0}"       # drop vote components below this (m
 # per station -- see scripts/sweep_pixel_vote.py.
 PIXEL_SUFFIX="${PIXEL_SUFFIX:-}"
 # Which table-4 ablations stage S5 runs; narrow it to split S5 across cards.
-S5_CONFIGS="${S5_CONFIGS:-noprior no_area no_ratio no_shape}"   # + only_shape
+# Defaults to all six, so a plain S5 run produces the whole of table 4. Narrow
+# it to split the work across cards.
+S5_CONFIGS="${S5_CONFIGS:-noprior no_area no_ratio no_shape only_shape only_area}"
 
 LOG_DIR="${OUT_ROOT}/_logs"
 # Several streams of the same stage can run at once (disjoint S5_CONFIGS split
@@ -757,16 +771,20 @@ stage_S4() {
 #
 # The "No module-geometry prior" row instead ranks on raw SAM3 confidence, which
 # is what NO_PRIOR_OPTS expresses.
-_prior_ablation() {
+# A variant that changes only the projection/scoring stage, so its t=0 costs no
+# inference: the shared pixel-space cache is reprojected under the new settings
+# and postprocessed. Used for both the module-geometry prior ablation (table 4,
+# score weights) and the projection-method ablation (table 5, oblique.method).
+_reprojection_variant() {
     local name="$1"; shift
     local -a weight_opts=("$@")
     local root="${OUT_ROOT}/${name}"
     local proj_dir="${root}/shared_proj"
 
-    # (1) t=0: reproject the shared cache under the ablated weights.
+    # (1) t=0: reproject the shared cache under the ablated settings.
     if ! compgen -G "${proj_dir}/*.shp" > /dev/null; then
         mkdir -p "$proj_dir"
-        log "${name} reprojecting shared cache under ablated weights"
+        log "${name} reprojecting shared cache under ablated settings"
         run_pipeline \
             "distributed.enabled=false" \
             "pipeline.run_inference=false" \
@@ -780,7 +798,7 @@ _prior_ablation() {
             "${weight_opts[@]}"
     fi
 
-    for ((t = 0; t <= 1; t++)); do
+    for ((t = 0; t <= ITER_MAX; t++)); do
         local tdir="${root}/iter_${t}"
         local final="${tdir}/final.shp"
         if [[ "$SKIP_EXISTING" == "1" && -f "$final" ]]; then
@@ -804,10 +822,19 @@ _prior_ablation() {
                    "output.per_image_shp_dir=${proj_dir}"
                    "inference.prompt.enabled=false" "inference.prompt.source=")
         else
+            # Chain off the *previous* round, not iter_0. Pinning the source to
+            # iter_0 was harmless while this loop stopped at t=1, but it makes
+            # every later round re-run the same prompts and report convergence
+            # that never happened.
+            local prev_prompts="${root}/iter_$((t - 1))/prompts"
+            if ! compgen -G "${prev_prompts}/*" > /dev/null; then
+                log "${name} FAILED: missing prompts from t=$((t - 1)) (${prev_prompts})"
+                return 1
+            fi
             opts+=("pipeline.run_inference=true" "pipeline.run_projection=true"
                    "data.data_root=${DATA_ROOT}" "data.image_glob=${IMAGE_GLOB}"
                    "inference.prompt.enabled=true"
-                   "inference.prompt.source=${root}/iter_0/prompts"
+                   "inference.prompt.source=${prev_prompts}"
                    "inference.prompt.strict_window_prompt=false"
                    "inference.prompt.max_prompt_per_window=5"
                    "output.per_image_raw_shp_dir=${tdir}/infer"
@@ -831,21 +858,21 @@ stage_S5() {
     # Deliberately unquoted: S5_CONFIGS is a space-separated selection.
     for name in $S5_CONFIGS; do
         case "$name" in
-            noprior)  _prior_ablation "abl_noprior"  "${NO_PRIOR_OPTS[@]}" ;;
-            no_area)  _prior_ablation "abl_no_area"  "projection.score.w_area=0.0" ;;
-            no_ratio) _prior_ablation "abl_no_ratio" "projection.score.w_ratio=0.0" ;;
-            no_shape) _prior_ablation "abl_no_shape" "projection.score.w_shape=0.0" ;;
+            noprior)  _reprojection_variant "abl_noprior"  "${NO_PRIOR_OPTS[@]}" ;;
+            no_area)  _reprojection_variant "abl_no_area"  "projection.score.w_area=0.0" ;;
+            no_ratio) _reprojection_variant "abl_no_ratio" "projection.score.w_ratio=0.0" ;;
+            no_shape) _reprojection_variant "abl_no_shape" "projection.score.w_shape=0.0" ;;
             # Cumulative view of table 4: keep only rectangularity. The next rung
             # up ("area + rectangularity") needs no run of its own -- it is
             # w_ratio=0, i.e. the existing abl_no_ratio.
             only_shape)
-                _prior_ablation "abl_only_shape" \
+                _reprojection_variant "abl_only_shape" \
                     "projection.score.w_area=0.0" "projection.score.w_ratio=0.0" ;;
             # The reverse ordering of the cumulative curve. Adding rectangularity
             # first makes it look inert, because RQ saturates the moment area
             # joins; area-first shows what rectangularity is still worth on top.
             only_area)
-                _prior_ablation "abl_only_area" \
+                _reprojection_variant "abl_only_area" \
                     "projection.score.w_ratio=0.0" "projection.score.w_shape=0.0" ;;
             *)
                 log "S5 FAILED: unknown ablation '${name}' (expected one of: noprior no_area no_ratio no_shape only_shape only_area)"
@@ -853,8 +880,131 @@ stage_S5() {
                 ;;
         esac
     done
-    log "S5 done for '${S5_CONFIGS}' (table 4; Full-prior row is ours/iter_1)"
+    log "S5 done for '${S5_CONFIGS}' (table 4; Full-prior row is full/iter_${ITER_MAX})"
 }
+
+# ------------------------------------------------- SPJ table 5: projection method
+# All three methods are already implemented and selected by one config key, so
+# this only changes projection.oblique.method. `auto` is excluded on purpose: it
+# tries affine and falls back to collinearity, which as an ablation row is a
+# mixture of the other two.
+#
+# proj_affine will drop features: with the method forced, anything yielding
+# fewer than three control points cannot determine an affine fit, gets tagged
+# affine_failed and is removed downstream. That is a real property of the
+# method -- do NOT tune thresholds to make the row look better, it would break
+# comparability. Count the drops and report the fraction in the table note.
+stage_SPJ() {
+    _reprojection_variant "proj_collin" "projection.oblique.method=collinearity"
+    _reprojection_variant "proj_affine" "projection.oblique.method=affine"
+    log "SPJ done (table 5; slope_correction row is full/iter_${ITER_MAX})"
+}
+
+# Getting the prompt filenames wrong is silent: the dataloader finds no match,
+# every image falls back to text-prompt-only, the run completes, and the ablation
+# reports a "no feedback" number under a feedback label. Counting is the only
+# way to see it, so it is not optional.
+#
+# Expected ratios: self-image is roughly one file per image; source-view is far
+# lower by construction (26-51% measured), because only the view that won the
+# NMS for an instance hears about it.
+_check_prompt_count() {
+    local name="$1" t="$2" prompt_dir="$3"
+    local n_img n_txt
+    n_img="$( { compgen -G "${DATA_ROOT}${IMAGE_GLOB}" || true; } | wc -l )"
+    n_txt="$( { find "$prompt_dir" -maxdepth 1 -name '*.txt' || true; } | wc -l )"
+    log "${name} t=${t}: ${n_txt} prompt files / ${n_img} images"
+    if [[ "$n_txt" -eq 0 ]]; then
+        log "${name} FAILED: no prompt files in ${prompt_dir}."
+        log "  Every image would fall back to text-prompt-only and the round"
+        log "  would measure nothing while looking successful."
+        return 1
+    fi
+}
+
+# ------------------------------------------- SFB table 3: feedback routing arms
+# Arms 2 and 3 of the four-arm chain. Both share t=0 with the main line -- the
+# fused result is identical, only the exported prompts differ -- so they diverge
+# from t=1 onward.
+#
+#   selfimg : no object space at all. Each image re-prompts with the pixel
+#             bboxes of its own previous-round masks.
+#   srcview : object-space fusion and the geometry prior are untouched; only the
+#             cross-view broadcast is removed, so an instance goes back solely
+#             to the view whose candidate won the NMS.
+_feedback_variant() {
+    local name="$1" routing="$2"
+    local root="${OUT_ROOT}/${name}"
+
+    for ((t = 0; t <= ITER_MAX; t++)); do
+        local tdir="${root}/iter_${t}"
+        local final="${tdir}/final.shp"
+        if [[ "$SKIP_EXISTING" == "1" && -f "$final" ]]; then
+            log "${name} t=${t} exists, skip"; continue
+        fi
+        mkdir -p "${tdir}/prompts"
+
+        # t=0 postprocesses the shared cache; later rounds write their own.
+        local raw_dir proj_dir
+        if [[ "$t" -eq 0 ]]; then
+            raw_dir="$SHARED_INFER"; proj_dir="$SHARED_PROJ"
+        else
+            raw_dir="${tdir}/infer"; proj_dir="${tdir}/proj"
+        fi
+
+        local -a opts=(
+            "pipeline.run_postprocess=true"
+            "postprocess.view_selection.enabled=false"
+            "postprocess.prompt_export.enabled=true"
+            "postprocess.prompt_export.output_dir=${tdir}/prompts"
+            "output.trace_exports.enabled=false"
+            "output.per_image_raw_shp_dir=${raw_dir}"
+            "output.per_image_shp_dir=${proj_dir}"
+            "output.final_merged_shp=${final}"
+        )
+
+        case "$routing" in
+            srcview)
+                opts+=("postprocess.prompt_export.include_intersections=false")
+                ;;
+            selfimg)
+                # Must read *this* round's masks, not t=0's: self-iteration has
+                # to advance each round or every round re-prompts t=0's boxes.
+                opts+=("postprocess.prompt_export.mode=self_image"
+                       "postprocess.prompt_export.per_image_raw_shp_dir=${raw_dir}")
+                ;;
+            *)
+                log "${name} FAILED: unknown routing '${routing}'"; return 1 ;;
+        esac
+
+        if [[ "$t" -eq 0 ]]; then
+            opts+=("distributed.enabled=false" "pipeline.run_inference=false"
+                   "pipeline.run_projection=false"
+                   "inference.prompt.enabled=false" "inference.prompt.source=")
+        else
+            local prev_prompts="${root}/iter_$((t - 1))/prompts"
+            if ! compgen -G "${prev_prompts}/*" > /dev/null; then
+                log "${name} FAILED: missing prompts from t=$((t - 1)) (${prev_prompts})"
+                return 1
+            fi
+            mkdir -p "${tdir}/infer" "${tdir}/proj"
+            opts+=("pipeline.run_inference=true" "pipeline.run_projection=true"
+                   "data.data_root=${DATA_ROOT}" "data.image_glob=${IMAGE_GLOB}"
+                   "inference.prompt.enabled=true"
+                   "inference.prompt.source=${prev_prompts}"
+                   "inference.prompt.strict_window_prompt=false"
+                   "inference.prompt.max_prompt_per_window=5")
+        fi
+
+        log "${name} t=${t} (${routing} routing)"
+        run_pipeline "${opts[@]}"
+        _check_prompt_count "$name" "$t" "${tdir}/prompts"
+    done
+    log "${name} done -> ${root}"
+}
+
+stage_SFB1() { _feedback_variant "fb_srcview" "srcview"; }
+stage_SFB2() { _feedback_variant "fb_selfimg" "selfimg"; }
 
 # ------------------------------------- S6 TDOM-only feedback path (RETIRED)
 #
@@ -962,12 +1112,9 @@ stage_S7() {
         --emit lists --out-root "$lists_root"
 
     for setdir in "${dirs_root}"/*/; do
-        local name t0_prompts list_file tdir final
+        local name list_file
         name="$(basename "$setdir")"
-        t0_prompts="${setdir}/prompts"
         list_file="${lists_root}/${name}.txt"
-        tdir="${OUT_ROOT}/iter_1/dirs/${name}"
-        final="${tdir}/final.shp"
 
         if [[ ! -f "${setdir}/final.shp" ]]; then
             log "S7 ${name}: no t=0 result, skip"; continue
@@ -975,41 +1122,55 @@ stage_S7() {
         if [[ ! -f "$list_file" ]]; then
             log "S7 ${name}: no image list (${list_file}), skip"; continue
         fi
-        if [[ "$SKIP_EXISTING" == "1" && -f "$final" ]]; then
-            log "S7 ${name} exists, skip"; continue
-        fi
 
-        mkdir -p "${tdir}/prompts" "${tdir}/infer" "${tdir}/proj"
-        log "S7 ${name} t=1 ($(wc -l < "$list_file") images)"
-        run_pipeline \
-            "pipeline.run_inference=true" \
-            "pipeline.run_projection=true" \
-            "pipeline.run_postprocess=true" \
-            "data.data_root=${DATA_ROOT}" \
-            "data.image_list_file=${list_file}" \
-            "data.image_glob=" \
-            "inference.prompt.enabled=true" \
-            "inference.prompt.source=${t0_prompts}" \
-            "inference.prompt.strict_window_prompt=false" \
-            "inference.prompt.max_prompt_per_window=5" \
-            "postprocess.view_selection.enabled=false" \
-            "postprocess.prompt_export.enabled=true" \
-            "postprocess.prompt_export.output_dir=${tdir}/prompts" \
-            "output.trace_exports.enabled=false" \
-            "output.per_image_raw_shp_dir=${tdir}/infer" \
-            "output.per_image_shp_dir=${tdir}/proj" \
-            "output.final_merged_shp=${final}"
+        # Each round chains off the previous one's prompts; t=1 reads the t=0
+        # set S4 wrote. Under the t=2 protocol this runs twice per direction set.
+        for ((t = 1; t <= ITER_MAX; t++)); do
+            local prev_prompts tdir final
+            prev_prompts="${OUT_ROOT}/iter_$((t - 1))/dirs/${name}/prompts"
+            tdir="${OUT_ROOT}/iter_${t}/dirs/${name}"
+            final="${tdir}/final.shp"
+
+            if [[ "$SKIP_EXISTING" == "1" && -f "$final" ]]; then
+                log "S7 ${name} t=${t} exists, skip"; continue
+            fi
+            if ! compgen -G "${prev_prompts}/*" > /dev/null; then
+                log "S7 ${name} t=${t}: no prompts from t=$((t - 1)) (${prev_prompts}), skip"
+                continue
+            fi
+
+            mkdir -p "${tdir}/prompts" "${tdir}/infer" "${tdir}/proj"
+            log "S7 ${name} t=${t} ($(wc -l < "$list_file") images)"
+            run_pipeline \
+                "pipeline.run_inference=true" \
+                "pipeline.run_projection=true" \
+                "pipeline.run_postprocess=true" \
+                "data.data_root=${DATA_ROOT}" \
+                "data.image_list_file=${list_file}" \
+                "data.image_glob=" \
+                "inference.prompt.enabled=true" \
+                "inference.prompt.source=${prev_prompts}" \
+                "inference.prompt.strict_window_prompt=false" \
+                "inference.prompt.max_prompt_per_window=5" \
+                "postprocess.view_selection.enabled=false" \
+                "postprocess.prompt_export.enabled=true" \
+                "postprocess.prompt_export.output_dir=${tdir}/prompts" \
+                "output.trace_exports.enabled=false" \
+                "output.per_image_raw_shp_dir=${tdir}/infer" \
+                "output.per_image_shp_dir=${tdir}/proj" \
+                "output.final_merged_shp=${final}"
+        done
     done
     log "S7 done"
 }
 
 for stage in "${STAGES[@]}"; do
     case "$stage" in
-        S0|S1|S1R|S1P|SD|SP|SM1|SM2|SM3|S2|S3|S4|S5|S6|S7)
+        S0|S1|S1R|S1P|SD|SP|SM1|SM2|SM3|S2|S3|S4|S5|S6|S7|SFB1|SFB2|SPJ)
             "stage_${stage}" 2>&1 | tee -a "${LOG_DIR}/${stage}${STAGE_LOG_SUFFIX}.log"
             ;;
         *)
-            echo "unknown stage: $stage (expected S0|S1|S1R|S1P|SD|SP|SM1|SM2|SM3|S2|S3|S4|S5|S6|S7)" >&2
+            echo "unknown stage: $stage (expected S0|S1|S1R|S1P|SD|SP|SM1|SM2|SM3|S2|S3|S4|S5|S6|S7|SFB1|SFB2|SPJ)" >&2
             exit 1
             ;;
     esac
