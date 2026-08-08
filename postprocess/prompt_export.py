@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,11 +39,16 @@ def _resolve_modes(cfg: Dict[str, Any]) -> List[str]:
     ``both`` drives the dual-source feedback loop (draft table 3, Full row):
     a single object-space result re-prompts the perspective images *and* the
     TDOM in the next round.
+
+    ``self_image`` is the image-space arm of the feedback-routing ablation and
+    reads the per-image results instead of the fused one.
     """
     prompt_cfg = _as_dict(_as_dict(cfg, "postprocess"), "prompt_export")
     mode = str(prompt_cfg.get("mode", "auto")).strip().lower()
     if mode in {"both", "dual"}:
         return ["oblique", "dom"]
+    if mode in {"self_image", "self"}:
+        return ["self_image"]
     if mode in {"oblique", "dom"}:
         return [mode]
 
@@ -506,6 +512,116 @@ def _export_dom_prompts(cfg: Dict[str, Any], shp_path: str, prompt_cfg: Dict[str
     return {"mode": "dom", "output": output_txt, "boxes": len(bboxes)}
 
 
+_RANK_SUFFIX_RE = re.compile(r"__r\d+$")
+
+
+def _pixel_bboxes_from_shp(
+    shp_path: str,
+    min_size: float,
+    min_confidence: float,
+) -> List[List[float]]:
+    """Envelopes of one image's masks, already in that image's pixel frame."""
+    ds = ogr.Open(shp_path)
+    if ds is None:
+        raise FileNotFoundError(f"Cannot open {shp_path}")
+    layer = ds.GetLayer()
+    has_con = layer.GetLayerDefn().GetFieldIndex("con") != -1
+
+    boxes: List[List[float]] = []
+    for feat in layer:
+        geom = feat.GetGeometryRef()
+        if geom is None:
+            continue
+        if has_con:
+            try:
+                if float(feat.GetFieldAsString("con")) < min_confidence:
+                    continue
+            except ValueError:
+                pass
+        min_x, max_x, min_y, max_y = geom.GetEnvelope()
+        if (max_x - min_x) < min_size or (max_y - min_y) < min_size:
+            continue
+        boxes.append([min_x, min_y, max_x, max_y])
+    return boxes
+
+
+def _export_self_image_prompts(cfg: Dict[str, Any], prompt_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-prompt each image with the pixel bboxes of its own previous-round masks.
+
+    The image-space arm of the feedback-routing ablation: the boxes never leave
+    the image they came from, so there is no object-space fusion, no geometry
+    prior and no cross-view broadcast. Unlike the other two exporters this one
+    reads the *per-image* results rather than one fused shapefile, so it takes
+    no ``shp_path``.
+
+    Matching is driven from the resolved image list rather than from the
+    shapefile names. The per-image files carry the glob-relative directory as a
+    prefix and the writing rank as a suffix (``images_<stem>__r0.shp``) while
+    ``inference/window_dataset.py`` looks prompts up as ``<stem>.txt``. Keying
+    off the images makes a layout change surface as a missing prompt file
+    instead of as a silent text-prompt-only fallback -- which would look like a
+    successful run that measured nothing.
+    """
+    output_cfg = _as_dict(cfg, "output")
+
+    raw_dir = str(prompt_cfg.get("per_image_raw_shp_dir", "")).strip()
+    if not raw_dir:
+        raw_dir = str(output_cfg.get("per_image_raw_shp_dir", "")).strip()
+    if not raw_dir or not os.path.isdir(raw_dir):
+        raise FileNotFoundError(f"Cannot find per_image_raw_shp_dir: {raw_dir}")
+
+    output_dir = str(prompt_cfg.get("output_dir", "")).strip()
+    if not output_dir:
+        final_merged_shp = str(output_cfg.get("final_merged_shp", "outputs/final_merged.shp"))
+        output_dir = os.path.splitext(final_merged_shp)[0] + "_bbox_prompts"
+    os.makedirs(output_dir, exist_ok=True)
+
+    min_size = float(prompt_cfg.get("min_size", 50.0))
+    min_confidence = float(prompt_cfg.get("min_confidence", 0.5))
+
+    by_key: Dict[str, str] = {}
+    for entry in sorted(os.listdir(raw_dir)):
+        if not entry.lower().endswith(".shp"):
+            continue
+        key = _RANK_SUFFIX_RE.sub("", os.path.splitext(entry)[0])
+        by_key.setdefault(key, os.path.join(raw_dir, entry))
+
+    images = resolve_image_paths(_as_dict(cfg, "data"))
+    file_count = 0
+    box_count = 0
+    for image_path in tqdm(images, desc="Exporting self-image prompts", leave=False):
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        shp_path = by_key.get(stem)
+        if shp_path is None:
+            for key, path in by_key.items():
+                if key.endswith("_" + stem):
+                    shp_path = path
+                    break
+        if shp_path is None:
+            continue
+
+        boxes = _pixel_bboxes_from_shp(
+            shp_path=shp_path,
+            min_size=min_size,
+            min_confidence=min_confidence,
+        )
+        if not boxes:
+            continue
+
+        out_path = os.path.join(output_dir, f"{stem}.txt")
+        with open(out_path, "w", encoding="utf-8") as f:
+            for b in boxes:
+                f.write(f"{b[0]},{b[1]},{b[2]},{b[3]}\n")
+        file_count += 1
+        box_count += len(boxes)
+
+    # ``images`` is what makes a short export detectable: a prompt directory
+    # holding fewer files than the run had images is the signature of the
+    # filename mapping having drifted.
+    return {"mode": "self_image", "output": output_dir, "images": len(images),
+            "files": file_count, "boxes": box_count}
+
+
 def maybe_export_bbox_prompts(cfg: Dict[str, Any], shp_path: str) -> Optional[Dict[str, Any]]:
     post_cfg = _as_dict(cfg, "postprocess")
     prompt_cfg = _as_dict(post_cfg, "prompt_export")
@@ -517,6 +633,9 @@ def maybe_export_bbox_prompts(cfg: Dict[str, Any], shp_path: str) -> Optional[Di
     for mode in modes:
         if mode == "dom":
             results.append(_export_dom_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg))
+        elif mode == "self_image":
+            # Reads the per-image results, so the fused shp_path is not used.
+            results.append(_export_self_image_prompts(cfg=cfg, prompt_cfg=prompt_cfg))
         else:
             results.append(_export_oblique_prompts(cfg=cfg, shp_path=shp_path, prompt_cfg=prompt_cfg))
 

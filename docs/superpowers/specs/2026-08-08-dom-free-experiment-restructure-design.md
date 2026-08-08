@@ -248,9 +248,15 @@
 
 每个方法 2 轮全量推理 + 1 次 CPU 投影，两个方法共 **4 轮 + 2 次 CPU 投影**。
 
-### 5.5 已知风险
+### 5.5 已知风险：`proj_affine` 会成批丢要素
 
-`analysis/` 目录里记录过仿射路径产出过大 footprint 的现象（与 M2/M3 像素投票崩塌相关）。如果 `proj_affine` 跑出异常大的多边形导致 NMS 或评估阶段爆内存/耗时失控，**先记录现象再决定是否调参** —— 不要为了让它"好看"而单独给它调阈值，那会破坏消融的可比性。表注如实写明即可。
+强制 `method: affine` 时，控制点少于 3 个的要素**无法确定仿射解**，`project_feature` 给它打上 `affine_failed` 并原样返回（仍是像方坐标），随后被 `project_and_score_features` 丢弃。这条路径已由 `tests/test_projection.py::test_forced_affine_without_enough_control_points_is_tagged_failed` 固化。
+
+后果：`proj_affine` 那一行的召回损失里，有一部分**不是投影不准，而是要素根本没进入输出**。这是该方法的真实性质，必须报告，但必须和"投影不准导致的漏检"区分开。
+
+因此跑 `proj_affine` 时**强制统计** `projection_method == "affine_failed"` 的要素数，并在表 5 的表注里给出丢弃比例。否则那一行会看起来莫名其妙地差，而真实原因（控制点不足）读者看不到。
+
+另外 `analysis/` 里记录过仿射路径产出过大 footprint 的现象（与 M2/M3 像素投票崩塌相关）。若 `proj_affine` 跑出异常大的多边形导致 NMS 或评估阶段耗时失控，**先记录现象，不调参** —— 为了让它"好看"而单独调阈值会破坏三种投影方式的可比性。
 
 ---
 
